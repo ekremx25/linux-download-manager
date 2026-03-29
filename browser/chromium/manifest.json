@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Linux Download Manager Bridge",
+  "version": "0.1.0",
+  "description": "Sends links from Chromium-based browsers to Linux Download Manager.",
+  "permissions": ["contextMenus", "downloads", "nativeMessaging", "storage", "webRequest"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script.js"],
+      "css": ["content-style.css"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_title": "Linux Download Manager"
+  }
+}

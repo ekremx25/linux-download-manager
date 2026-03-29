@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Linux Download Manager</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app">
+        <header class="app-header">
+            <h1>Linux Download Manager</h1>
+            <div class="header-actions">
+                <button id="toggle-settings" class="btn btn-ghost">Ayarlar</button>
+            </div>
+        </header>
+
+        <section id="settings-panel" class="settings-panel" hidden>
+            <h2>Uygulama Ayarları</h2>
+            <div class="settings-grid">
+                <label>Varsayılan indirme klasörü</label>
+                <div class="setting-value" id="settings-download-dir">~/Downloads</div>
+
+                <label>Maksimum eşzamanlı indirme</label>
+                <input type="number" id="settings-max-concurrent" min="1" max="10" value="3">
+
+                <label>Varsayılan bant genişliği limiti (KB/s)</label>
+                <input type="number" id="settings-bandwidth-limit" min="0" placeholder="0 = limitsiz">
+            </div>
+            <button id="save-settings" class="btn btn-primary">Kaydet</button>
+        </section>
+
+        <section class="download-form">
+            <h2>Yeni İndirme</h2>
+            <div class="form-row">
+                <input type="text" id="url-input" placeholder="İndirme URL'sini yapıştırın..." class="input-url">
+                <button id="inspect-btn" class="btn btn-secondary">İncele</button>
+            </div>
+
+            <div id="metadata-panel" class="metadata-panel" hidden>
+                <div class="metadata-grid">
+                    <span class="meta-label">Dosya adı:</span>
+                    <span id="meta-filename" class="meta-value">-</span>
+                    <span class="meta-label">Boyut:</span>
+                    <span id="meta-size" class="meta-value">-</span>
+                    <span class="meta-label">Tür:</span>
+                    <span id="meta-type" class="meta-value">-</span>
+                    <span class="meta-label">Devam ettirilebilir:</span>
+                    <span id="meta-resumable" class="meta-value">-</span>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Kayıt klasörü</label>
+                        <div class="input-with-button">
+                            <input type="text" id="save-dir-input" placeholder="Varsayılan klasör">
+                            <button id="pick-dir-btn" class="btn btn-ghost">Seç</button>
+                        </div>
+                    </div>
+                </div>
+
+                <details class="advanced-options">
+                    <summary>Gelişmiş seçenekler</summary>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>SHA-256 checksum</label>
+                            <input type="text" id="checksum-input" placeholder="İsteğe bağlı doğrulama">
+                        </div>
+                        <div class="form-group">
+                            <label>Bant genişliği limiti (KB/s)</label>
+                            <input type="number" id="bandwidth-input" min="0" placeholder="0 = limitsiz">
+                        </div>
+                        <div class="form-group">
+                            <label>Zamanlama</label>
+                            <input type="datetime-local" id="schedule-input">
+                        </div>
+                    </div>
+                </details>
+
+                <button id="start-btn" class="btn btn-primary btn-large">İndirmeyi Başlat</button>
+            </div>
+        </section>
+
+        <section class="download-list">
+            <div class="list-header">
+                <h2>İndirmeler</h2>
+                <div class="list-header-right">
+                    <div id="queue-summary" class="queue-summary"></div>
+                    <button id="clear-completed-btn" class="btn btn-small btn-ghost">Clear All</button>
+                </div>
+            </div>
+            <div id="downloads-container" class="downloads-container">
+                <p class="empty-message">Henüz indirme yok.</p>
+            </div>
+        </section>
+    </div>
+
+    <script src="main.js"></script>
+</body>
+</html>
