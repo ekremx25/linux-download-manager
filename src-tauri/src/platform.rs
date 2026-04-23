@@ -136,14 +136,32 @@ fn install_browser_extension(exe_dir: &Path, app_data: &Path, home: &str) {
         .join("Linux Download Manager Extension");
     let ext_marker = app_data.join(".extension_installed");
 
-    let resource_dir = exe_dir.join("_up_/browser/chromium");
-    let alt_resource_dir = exe_dir.join("../resources/browser/chromium");
-    let source_dir = if resource_dir.is_dir() {
-        resource_dir
-    } else if alt_resource_dir.is_dir() {
-        alt_resource_dir
-    } else {
-        return;
+    // Tauri's AppImage bundler puts resource files under
+    // `usr/lib/<ProductName>/_up_/browser/...`, so from `usr/bin/<binary>`
+    // the correct relative path is `../lib/<ProductName>/_up_/browser/chromium`.
+    // Older Tauri builds and `cargo tauri dev` put resources next to the
+    // binary at `_up_/browser/chromium`, so we check several candidates.
+    let mut candidates: Vec<PathBuf> = vec![
+        exe_dir.join("_up_/browser/chromium"),
+        exe_dir.join("../resources/browser/chromium"),
+    ];
+    if let Some(parent) = exe_dir.parent() {
+        // Walk every subdirectory of `../lib/` — we don't hard-code the
+        // product name so a rename of the app doesn't break this path.
+        let lib_dir = parent.join("lib");
+        if let Ok(entries) = fs::read_dir(&lib_dir) {
+            for entry in entries.flatten() {
+                let c = entry.path().join("_up_/browser/chromium");
+                if c.is_dir() {
+                    candidates.push(c);
+                }
+            }
+        }
+    }
+
+    let source_dir = match candidates.into_iter().find(|p| p.is_dir()) {
+        Some(p) => p,
+        None => return,
     };
 
     let _ = fs::create_dir_all(&ext_dest);
