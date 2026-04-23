@@ -129,7 +129,11 @@ fn detect_extension_id(home: &str) -> String {
 }
 
 fn install_browser_extension(exe_dir: &Path, app_data: &Path, home: &str) {
-    let ext_dest = app_data.join("extension");
+    // Put the extension under ~/Documents so the user can find it visually
+    // ("Load unpacked" in chrome://extensions), not buried under ~/.local/share.
+    let ext_dest = PathBuf::from(home)
+        .join("Documents")
+        .join("Linux Download Manager Extension");
     let ext_marker = app_data.join(".extension_installed");
 
     let resource_dir = exe_dir.join("_up_/browser/chromium");
@@ -161,10 +165,15 @@ fn install_browser_extension(exe_dir: &Path, app_data: &Path, home: &str) {
         ("google-chrome", format!("{home}/.config/google-chrome")),
         ("chromium-browser", format!("{home}/.config/chromium")),
         ("brave-browser", format!("{home}/.config/BraveSoftware/Brave-Browser")),
+        ("brave", format!("{home}/.config/BraveSoftware/Brave-Browser")),
     ];
 
+    // Open the extensions page on whichever Chromium-based browser the user
+    // actually has installed. First match wins.
     for (browser_cmd, config_dir) in &browsers {
-        if Path::new(config_dir).exists() {
+        if Path::new(config_dir).exists() && Command::new("which").arg(browser_cmd).output()
+            .map(|o| o.status.success()).unwrap_or(false)
+        {
             let _ = Command::new(browser_cmd)
                 .arg("chrome://extensions")
                 .spawn();
@@ -172,18 +181,47 @@ fn install_browser_extension(exe_dir: &Path, app_data: &Path, home: &str) {
         }
     }
 
-    let _ = Command::new("notify-send")
-        .arg("Linux Download Manager")
-        .arg(format!(
-            "Extension kurulumu:\n\
-            1. Açılan chrome://extensions sayfasında 'Geliştirici modu'nu açın\n\
-            2. 'Paketlenmemiş öğe yükle' tıklayın\n\
-            3. Bu klasörü seçin:\n{}",
-            ext_dest.display()
-        ))
-        .arg("-t")
-        .arg("15000")
-        .spawn();
+    // Show a proper modal dialog (zenity → kdialog → notify-send fallback)
+    // with the exact path the user has to pick in 'Load unpacked'.
+    let message = format!(
+        "Linux Download Manager kuruldu.\n\n\
+        Tarayıcı eklentisini yüklemek için:\n\n\
+        1. Açılan chrome://extensions sayfasında sağ üstten \
+        \"Geliştirici modu\" / \"Developer mode\"'u açın\n\n\
+        2. \"Paketlenmemiş öğe yükle\" / \"Load unpacked\" butonuna tıklayın\n\n\
+        3. Şu klasörü seçin:\n   {}\n\n\
+        (Bu klasör Documents altındadır; silmeyin, uygulama bu konuma bağlı.)",
+        ext_dest.display()
+    );
+
+    let zenity_ok = Command::new("zenity")
+        .args([
+            "--info",
+            "--title=Linux Download Manager",
+            "--width=520",
+            &format!("--text={message}"),
+        ])
+        .spawn()
+        .is_ok();
+
+    if !zenity_ok {
+        let kdialog_ok = Command::new("kdialog")
+            .args(["--title", "Linux Download Manager", "--msgbox", &message])
+            .spawn()
+            .is_ok();
+
+        if !kdialog_ok {
+            // Final fallback: notify-send (no interactive modal).
+            let _ = Command::new("notify-send")
+                .args([
+                    "Linux Download Manager",
+                    &message,
+                    "-t",
+                    "30000",
+                ])
+                .spawn();
+        }
+    }
 
     let _ = fs::write(&ext_marker, ext_dest.to_string_lossy().as_ref());
 }
