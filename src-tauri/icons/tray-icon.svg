@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <!--
+    Tray / status-bar icon.
+    Kept flat, monochrome, generously spaced — must read clearly at 16 px.
+    No background, no gradient: the system renders it on its own tray.
+  -->
+  <g fill="#FFFFFF">
+    <!-- Arrow stem -->
+    <rect x="13" y="4"  width="6" height="14" rx="1.5"/>
+    <!-- Arrow head (wider than stem, symmetrical, rounded tip) -->
+    <path d="
+      M 6 14
+      L 26 14
+      Q 28 14, 26.5 16
+      L 17.5 26.5
+      Q 16 28.5, 14.5 26.5
+      L 5.5 16
+      Q 4 14, 6 14
+      Z"/>
+    <!-- Tray line -->
+    <rect x="5" y="27" width="22" height="3" rx="1.5"/>
+  </g>
+</svg>

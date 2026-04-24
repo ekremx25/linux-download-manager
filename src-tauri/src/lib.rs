@@ -41,7 +41,9 @@ pub fn run() {
                 .item(&quit_item)
                 .build()?;
 
-            let icon_bytes = include_bytes!("../icons/icon.png");
+            // Dedicated flat/monochrome icon for the system tray — the
+            // full-colour app icon turns into mush at 16–22 px.
+            let icon_bytes = include_bytes!("../icons/tray-icon.png");
             let tray_icon = Image::from_bytes(icon_bytes)?;
 
             let handle_for_tray = app_handle.clone();
