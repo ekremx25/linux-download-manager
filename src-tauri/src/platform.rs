@@ -248,25 +248,86 @@ fn install_ytdlp(home: &str) {
     let local_bin = format!("{home}/.local/bin");
     let ytdlp_path = format!("{local_bin}/yt-dlp");
 
-    if Path::new(&ytdlp_path).exists() {
+    let already_present = Path::new(&ytdlp_path).exists()
+        || Command::new("yt-dlp").arg("--version").output().is_ok();
+
+    if !already_present {
+        let _ = fs::create_dir_all(&local_bin);
+        let curl_status = Command::new("curl")
+            .args([
+                "-fL",
+                "-o",
+                &ytdlp_path,
+                "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp",
+            ])
+            .status();
+
+        match curl_status {
+            Ok(status) if status.success() => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(
+                        &ytdlp_path,
+                        fs::Permissions::from_mode(0o755),
+                    );
+                }
+            }
+            _ => {
+                eprintln!(
+                    "WARNING: failed to download yt-dlp. YouTube/social media \
+                     downloads will be disabled until you run:\n\
+                     \tcurl -fL -o ~/.local/bin/yt-dlp \\\n\
+                     \t\thttps://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp\n\
+                     \tchmod +x ~/.local/bin/yt-dlp"
+                );
+                return;
+            }
+        }
+    }
+
+    configure_ytdlp_js_runtime(home);
+}
+
+/// yt-dlp needs a JavaScript runtime (deno or node) for YouTube signature
+/// extraction since late 2024. Detect whichever is on PATH and pin it in
+/// `~/.config/yt-dlp/config` so the app's `yt-dlp` calls don't need extra
+/// flags. Preserve any user-authored lines already in the config.
+fn configure_ytdlp_js_runtime(home: &str) {
+    let runtime = if Command::new("deno").arg("--version").output().is_ok() {
+        "deno"
+    } else if Command::new("node").arg("--version").output().is_ok() {
+        "node"
+    } else {
+        eprintln!(
+            "WARNING: no JavaScript runtime (deno / node) found. YouTube \
+             downloads may be limited. Install one with your package manager \
+             and re-run the app."
+        );
         return;
-    }
+    };
 
-    if Command::new("yt-dlp").arg("--version").output().is_ok() {
-        return;
-    }
+    let config_dir = PathBuf::from(home).join(".config").join("yt-dlp");
+    let config_file = config_dir.join("config");
+    let _ = fs::create_dir_all(&config_dir);
 
-    let _ = fs::create_dir_all(&local_bin);
-    let _ = Command::new("curl")
-        .arg("-L")
-        .arg("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp")
-        .arg("-o")
-        .arg(&ytdlp_path)
-        .output();
+    let existing: Vec<String> = match fs::read_to_string(&config_file) {
+        Ok(s) => s
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("--js-runtimes") && !t.starts_with("--no-mtime")
+            })
+            .map(String::from)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&ytdlp_path, fs::Permissions::from_mode(0o755));
-    }
+    let mut lines = vec![
+        format!("--js-runtimes {runtime}"),
+        "--no-mtime".to_string(),
+    ];
+    lines.extend(existing.into_iter().filter(|l| !l.is_empty()));
+
+    let _ = fs::write(&config_file, lines.join("\n") + "\n");
 }

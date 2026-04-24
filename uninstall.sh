@@ -22,6 +22,20 @@ rm -f "${HOME}/.local/bin/linux-download-manager"
 log "Removing app data (${HOME}/.local/share/linux-download-manager)"
 rm -rf "${HOME}/.local/share/linux-download-manager"
 
+# yt-dlp itself is a generally useful tool, leave it installed. We only
+# remove the LDM-specific config line we added.
+if [[ -f "${HOME}/.config/yt-dlp/config" ]]; then
+  log "Cleaning LDM entries from yt-dlp config"
+  tmp="$(mktemp)"
+  grep -vE '^(--js-runtimes|--no-mtime)' "${HOME}/.config/yt-dlp/config" > "${tmp}" || true
+  if [[ -s "${tmp}" ]]; then
+    mv "${tmp}" "${HOME}/.config/yt-dlp/config"
+  else
+    rm -f "${tmp}" "${HOME}/.config/yt-dlp/config"
+    rmdir --ignore-fail-on-non-empty "${HOME}/.config/yt-dlp" 2>/dev/null || true
+  fi
+fi
+
 log "Removing desktop entry + icon"
 rm -f "${HOME}/.local/share/applications/linux-download-manager.desktop"
 rm -f "${HOME}/.local/share/icons/hicolor/256x256/apps/linux-download-manager.png"

@@ -142,6 +142,68 @@ EOF
     gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor/" 2>/dev/null || true
 }
 
+install_ytdlp_and_deps() {
+  log "Installing yt-dlp and its runtime dependencies"
+
+  # yt-dlp itself — drop a single-file binary into ~/.local/bin.
+  local ytdlp_path="${BIN_DIR}/yt-dlp"
+  if ! command -v yt-dlp >/dev/null 2>&1 && [[ ! -x "${ytdlp_path}" ]]; then
+    info "    fetching yt-dlp release…"
+    if ! curl -fL --progress-bar \
+        -o "${ytdlp_path}" \
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"; then
+      warn "yt-dlp download failed. YouTube/social media downloads will be disabled."
+      return 0
+    fi
+    chmod +x "${ytdlp_path}"
+    info "    yt-dlp → ${ytdlp_path} ($(${ytdlp_path} --version 2>/dev/null || echo "??"))"
+  else
+    info "    yt-dlp already on PATH — skipping"
+  fi
+
+  # ffmpeg is needed for video+audio stream muxing on YouTube.
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    warn "ffmpeg not found. YouTube HD downloads need it to merge audio + video."
+    if   command -v pacman >/dev/null 2>&1; then info "    sudo pacman -S ffmpeg"
+    elif command -v apt    >/dev/null 2>&1; then info "    sudo apt install ffmpeg"
+    elif command -v dnf    >/dev/null 2>&1; then info "    sudo dnf install ffmpeg"
+    fi
+  fi
+
+  # yt-dlp needs a JavaScript runtime for YouTube signature extraction (since
+  # late 2024). Prefer deno (recommended upstream), fall back to node.
+  local js_runtime=""
+  if command -v deno >/dev/null 2>&1; then
+    js_runtime="deno"
+  elif command -v node >/dev/null 2>&1; then
+    js_runtime="node"
+  else
+    warn "No JavaScript runtime (deno / node) found — YouTube downloads will be degraded."
+    if   command -v pacman >/dev/null 2>&1; then info "    sudo pacman -S nodejs      # or: yay -S deno-bin"
+    elif command -v apt    >/dev/null 2>&1; then info "    sudo apt install nodejs"
+    elif command -v dnf    >/dev/null 2>&1; then info "    sudo dnf install nodejs"
+    fi
+    info "    Once installed, re-run this script — it'll wire the runtime into yt-dlp's config."
+    return 0
+  fi
+
+  # Persistent yt-dlp config so every invocation (including the one from the
+  # LDM binary) uses the detected runtime without needing extra flags.
+  local config_dir="${HOME}/.config/yt-dlp"
+  local config_file="${config_dir}/config"
+  mkdir -p "${config_dir}"
+  # Preserve any existing config the user may have hand-tuned, but make sure
+  # the js-runtimes line is present and correct.
+  local existing=""
+  [[ -f "${config_file}" ]] && existing="$(grep -v '^--js-runtimes' "${config_file}" 2>/dev/null || true)"
+  {
+    echo "--js-runtimes ${js_runtime}"
+    echo "--no-mtime"
+    [[ -n "${existing}" ]] && echo "${existing}"
+  } > "${config_file}"
+  info "    yt-dlp config → ${config_file} (js-runtime: ${js_runtime})"
+}
+
 install_native_host() {
   log "Writing Chromium native messaging manifest"
   local browsers=(
@@ -205,4 +267,5 @@ install_binary
 install_extension
 install_desktop_entry
 install_native_host
+install_ytdlp_and_deps
 final_instructions
