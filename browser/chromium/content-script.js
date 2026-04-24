@@ -728,6 +728,9 @@ function refreshInlineDownloadButtons() {
   if (/x\.com|twitter\.com/.test(host)) {
     injectTwitterButtons();
   }
+  if (/(^|\.)(facebook\.com|fb\.watch)$/.test(host)) {
+    injectFacebookButtons();
+  }
 }
 
 function injectRedditButtons() {
@@ -895,6 +898,87 @@ function injectTwitterButtons() {
         url: postUrl || null,
         kind: "media-fallback",
         title: title
+      };
+      activeCandidate = candidate;
+      triggerCaptureForCandidate(candidate, btn);
+    }, true);
+
+    const parentPos = window.getComputedStyle(videoContainer).position;
+    if (parentPos === "static") {
+      videoContainer.style.setProperty("position", "relative", "");
+    }
+    videoContainer.appendChild(btn);
+  }
+}
+
+function injectFacebookButtons() {
+  const videos = document.querySelectorAll("video");
+  for (const video of videos) {
+    if (!(video instanceof HTMLMediaElement)) continue;
+
+    const rect = video.getBoundingClientRect();
+    if (rect.width < 120 || rect.height < 80) continue;
+
+    const anchor = video.closest('[data-pagelet*="FeedUnit"], [data-pagelet*="Reels"], [data-pagelet*="Video"], div[role="article"]')
+      || video.parentElement;
+    if (!anchor) continue;
+    if (anchor.querySelector(".ldm-site-btn")) continue;
+
+    const videoContainer = video.closest('[data-video-id], [data-pagelet*="Video"]') || video.parentElement;
+    if (!videoContainer) continue;
+
+    let postUrl = null;
+    const permalinkSelectors = [
+      'a[href*="/videos/"]',
+      'a[href*="/reel/"]',
+      'a[href*="/watch/?v="]',
+      'a[href*="fb.watch"]',
+      'a[href*="/share/v/"]',
+      'a[href*="/share/r/"]'
+    ];
+    const links = anchor.querySelectorAll(permalinkSelectors.join(","));
+    for (const link of links) {
+      if (link.href && /^https?:/.test(link.href)) {
+        postUrl = link.href.split("#")[0];
+        break;
+      }
+    }
+    if (!postUrl) postUrl = window.location.href;
+
+    const btn = document.createElement("div");
+    btn.className = "ldm-site-btn";
+    btn.textContent = "⬇ LDM";
+    btn.setAttribute("style", `
+      position: absolute !important;
+      top: 8px !important;
+      right: 8px !important;
+      z-index: 2147483647 !important;
+      background: linear-gradient(135deg, #3dd29f, #86e8ff) !important;
+      color: #04110d !important;
+      border: 0 !important;
+      border-radius: 6px !important;
+      padding: 6px 14px !important;
+      font: 700 12px/1 sans-serif !important;
+      cursor: pointer !important;
+      pointer-events: auto !important;
+      user-select: none !important;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4) !important;
+      opacity: 0.85 !important;
+      transition: opacity 0.15s !important;
+    `);
+
+    btn.addEventListener("mouseenter", () => btn.style.setProperty("opacity", "1", "important"));
+    btn.addEventListener("mouseleave", () => btn.style.setProperty("opacity", "0.85", "important"));
+    btn.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); }, true);
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+
+      const candidate = {
+        element: video,
+        url: postUrl,
+        kind: "media-fallback"
       };
       activeCandidate = candidate;
       triggerCaptureForCandidate(candidate, btn);
