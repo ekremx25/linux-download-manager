@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="tr">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -11,86 +11,86 @@
         <header class="app-header">
             <h1>Linux Download Manager</h1>
             <div class="header-actions">
-                <button id="toggle-settings" class="btn btn-ghost">Ayarlar</button>
+                <button id="toggle-settings" class="btn btn-ghost">Settings</button>
             </div>
         </header>
 
         <section id="settings-panel" class="settings-panel" hidden>
-            <h2>Uygulama Ayarları</h2>
+            <h2>Application Settings</h2>
             <div class="settings-grid">
-                <label>Varsayılan indirme klasörü</label>
+                <label>Default download folder</label>
                 <div class="setting-value" id="settings-download-dir">~/Downloads</div>
 
-                <label>Maksimum eşzamanlı indirme</label>
+                <label>Maximum concurrent downloads</label>
                 <input type="number" id="settings-max-concurrent" min="1" max="10" value="3">
 
-                <label>Varsayılan bant genişliği limiti (KB/s)</label>
-                <input type="number" id="settings-bandwidth-limit" min="0" placeholder="0 = limitsiz">
+                <label>Default bandwidth limit (KB/s)</label>
+                <input type="number" id="settings-bandwidth-limit" min="0" placeholder="0 = unlimited">
             </div>
-            <button id="save-settings" class="btn btn-primary">Kaydet</button>
+            <button id="save-settings" class="btn btn-primary">Save</button>
         </section>
 
         <section class="download-form">
-            <h2>Yeni İndirme</h2>
+            <h2>New Download</h2>
             <div class="form-row">
-                <input type="text" id="url-input" placeholder="İndirme URL'sini yapıştırın..." class="input-url">
-                <button id="inspect-btn" class="btn btn-secondary">İncele</button>
+                <input type="text" id="url-input" placeholder="Paste a download URL..." class="input-url">
+                <button id="inspect-btn" class="btn btn-secondary">Inspect</button>
             </div>
 
             <div id="metadata-panel" class="metadata-panel" hidden>
                 <div class="metadata-grid">
-                    <span class="meta-label">Dosya adı:</span>
+                    <span class="meta-label">File name:</span>
                     <span id="meta-filename" class="meta-value">-</span>
-                    <span class="meta-label">Boyut:</span>
+                    <span class="meta-label">Size:</span>
                     <span id="meta-size" class="meta-value">-</span>
-                    <span class="meta-label">Tür:</span>
+                    <span class="meta-label">Type:</span>
                     <span id="meta-type" class="meta-value">-</span>
-                    <span class="meta-label">Devam ettirilebilir:</span>
+                    <span class="meta-label">Resumable:</span>
                     <span id="meta-resumable" class="meta-value">-</span>
                 </div>
 
                 <div class="form-row">
                     <div class="form-group">
-                        <label>Kayıt klasörü</label>
+                        <label>Save folder</label>
                         <div class="input-with-button">
-                            <input type="text" id="save-dir-input" placeholder="Varsayılan klasör">
-                            <button id="pick-dir-btn" class="btn btn-ghost">Seç</button>
+                            <input type="text" id="save-dir-input" placeholder="Default folder">
+                            <button id="pick-dir-btn" class="btn btn-ghost">Choose</button>
                         </div>
                     </div>
                 </div>
 
                 <details class="advanced-options">
-                    <summary>Gelişmiş seçenekler</summary>
+                    <summary>Advanced options</summary>
                     <div class="form-row">
                         <div class="form-group">
                             <label>SHA-256 checksum</label>
-                            <input type="text" id="checksum-input" placeholder="İsteğe bağlı doğrulama">
+                            <input type="text" id="checksum-input" placeholder="Optional integrity check">
                         </div>
                         <div class="form-group">
-                            <label>Bant genişliği limiti (KB/s)</label>
-                            <input type="number" id="bandwidth-input" min="0" placeholder="0 = limitsiz">
+                            <label>Bandwidth limit (KB/s)</label>
+                            <input type="number" id="bandwidth-input" min="0" placeholder="0 = unlimited">
                         </div>
                         <div class="form-group">
-                            <label>Zamanlama</label>
+                            <label>Schedule</label>
                             <input type="datetime-local" id="schedule-input">
                         </div>
                     </div>
                 </details>
 
-                <button id="start-btn" class="btn btn-primary btn-large">İndirmeyi Başlat</button>
+                <button id="start-btn" class="btn btn-primary btn-large">Start download</button>
             </div>
         </section>
 
         <section class="download-list">
             <div class="list-header">
-                <h2>İndirmeler</h2>
+                <h2>Downloads</h2>
                 <div class="list-header-right">
                     <div id="queue-summary" class="queue-summary"></div>
-                    <button id="clear-completed-btn" class="btn btn-small btn-ghost">Clear All</button>
+                    <button id="clear-completed-btn" class="btn btn-small btn-ghost">Clear all</button>
                 </div>
             </div>
             <div id="downloads-container" class="downloads-container">
-                <p class="empty-message">Henüz indirme yok.</p>
+                <p class="empty-message">No downloads yet.</p>
             </div>
         </section>
     </div>

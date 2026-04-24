@@ -28,7 +28,7 @@ async function inspectUrl() {
     if (!url) return;
 
     const btn = document.getElementById("inspect-btn");
-    btn.textContent = "İnceleniyor...";
+    btn.textContent = "Inspecting…";
     btn.disabled = true;
 
     try {
@@ -36,9 +36,9 @@ async function inspectUrl() {
         currentMetadata = metadata;
         showMetadata(metadata);
     } catch (error) {
-        alert("URL incelenemedi: " + error);
+        alert("Could not inspect URL: " + error);
     } finally {
-        btn.textContent = "İncele";
+        btn.textContent = "Inspect";
         btn.disabled = false;
     }
 }
@@ -50,9 +50,9 @@ function showMetadata(metadata) {
     document.getElementById("meta-filename").textContent = metadata.suggestedFileName;
     document.getElementById("meta-size").textContent = metadata.contentLength
         ? formatBytes(metadata.contentLength)
-        : "Bilinmiyor";
-    document.getElementById("meta-type").textContent = metadata.contentType || "Bilinmiyor";
-    document.getElementById("meta-resumable").textContent = metadata.resumable ? "Evet" : "Hayır";
+        : "Unknown";
+    document.getElementById("meta-type").textContent = metadata.contentType || "Unknown";
+    document.getElementById("meta-resumable").textContent = metadata.resumable ? "Yes" : "No";
 }
 
 async function startDownload() {
@@ -81,7 +81,7 @@ async function startDownload() {
         document.getElementById("schedule-input").value = "";
         currentMetadata = null;
     } catch (error) {
-        alert("İndirme başlatılamadı: " + error);
+        alert("Could not start download: " + error);
     }
 }
 
@@ -92,7 +92,7 @@ async function pickDirectory() {
             document.getElementById("save-dir-input").value = path;
         }
     } catch (error) {
-        console.error("Klasör seçilemedi:", error);
+        console.error("Could not pick folder:", error);
     }
 }
 
@@ -108,7 +108,7 @@ async function loadSettings() {
         document.getElementById("settings-max-concurrent").value = settings.maxConcurrentDownloads;
         document.getElementById("settings-bandwidth-limit").value = settings.defaultBandwidthLimitKbps || "";
     } catch (error) {
-        console.error("Ayarlar yüklenemedi:", error);
+        console.error("Could not load settings:", error);
     }
 }
 
@@ -123,7 +123,7 @@ async function saveSettings() {
         });
         toggleSettings();
     } catch (error) {
-        alert("Ayarlar kaydedilemedi: " + error);
+        alert("Could not save settings: " + error);
     }
 }
 
@@ -132,7 +132,7 @@ async function clearCompleted() {
         const count = await invoke("clear_completed");
         await loadDownloads();
     } catch (error) {
-        alert("Temizleme başarısız: " + error);
+        alert("Could not clear list: " + error);
     }
 }
 
@@ -141,7 +141,7 @@ async function loadDownloads() {
         const downloads = await invoke("list_downloads");
         renderDownloads(downloads);
     } catch (error) {
-        console.error("İndirmeler yüklenemedi:", error);
+        console.error("Could not load downloads:", error);
     }
 }
 
@@ -157,7 +157,7 @@ function renderDownloads(downloads) {
     const container = document.getElementById("downloads-container");
 
     if (downloads.length === 0) {
-        container.innerHTML = '<p class="empty-message">Henüz indirme yok.</p>';
+        container.innerHTML = '<p class="empty-message">No downloads yet.</p>';
         return;
     }
 
@@ -176,18 +176,18 @@ function renderDownloadItem(dl) {
 
     let actions = "";
     if (dl.status === "in_progress" || dl.status === "queued") {
-        actions += `<button class="btn btn-small btn-secondary" data-action="pause" data-id="${dl.id}">Duraklat</button>`;
-        actions += `<button class="btn btn-small btn-danger" data-action="cancel" data-id="${dl.id}">İptal</button>`;
+        actions += `<button class="btn btn-small btn-secondary" data-action="pause" data-id="${dl.id}">Pause</button>`;
+        actions += `<button class="btn btn-small btn-danger" data-action="cancel" data-id="${dl.id}">Cancel</button>`;
     } else if (dl.status === "paused" || dl.status === "failed") {
-        actions += `<button class="btn btn-small btn-primary" data-action="resume" data-id="${dl.id}">Devam</button>`;
-        actions += `<button class="btn btn-small btn-danger" data-action="cancel" data-id="${dl.id}">İptal</button>`;
+        actions += `<button class="btn btn-small btn-primary" data-action="resume" data-id="${dl.id}">Resume</button>`;
+        actions += `<button class="btn btn-small btn-danger" data-action="cancel" data-id="${dl.id}">Cancel</button>`;
     }
 
     let checksumHtml = "";
     if (dl.checksumStatus === "verified") {
-        checksumHtml = '<span class="checksum-verified">✓ Checksum doğrulandı</span>';
+        checksumHtml = '<span class="checksum-verified">✓ Checksum verified</span>';
     } else if (dl.checksumStatus === "mismatch") {
-        checksumHtml = '<span class="checksum-mismatch">✗ Checksum uyuşmuyor</span>';
+        checksumHtml = '<span class="checksum-mismatch">✗ Checksum mismatch</span>';
     }
 
     let errorHtml = "";
@@ -226,7 +226,7 @@ function attachDownloadActions() {
                 await invoke(`${action}_download`, { id });
                 await loadDownloads();
             } catch (error) {
-                alert(`İşlem başarısız: ${error}`);
+                alert(`Action failed: ${error}`);
             }
         });
     });
@@ -275,7 +275,7 @@ function updateQueueSummary(downloads) {
     const pending = downloads.filter((d) => d.status === "queued" || d.status === "scheduled").length;
     const summary = document.getElementById("queue-summary");
     if (active || pending) {
-        summary.textContent = `${active} aktif, ${pending} bekleyen`;
+        summary.textContent = `${active} active, ${pending} pending`;
     } else {
         summary.textContent = "";
     }
