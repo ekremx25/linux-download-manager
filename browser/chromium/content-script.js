@@ -65,7 +65,14 @@ let periodicRefreshHandle = null;
 
 bootstrap();
 
+function isExcludedHost(hostname) {
+  return /(^|\.)(whatsapp\.com|whatsapp\.net)$/i.test(hostname);
+}
+
 function bootstrap() {
+  if (isExcludedHost(window.location.hostname)) {
+    return;
+  }
   createHoverButton();
   createMediaOverlay();
   createToastRoot();

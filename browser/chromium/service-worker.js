@@ -191,6 +191,14 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
     return;
   }
 
+  if (parsedDownloadUrl && /(^|\.)(whatsapp\.com|whatsapp\.net)$/i.test(parsedDownloadUrl.hostname)) {
+    return;
+  }
+  const referrerUrl = safeParseUrl(downloadItem.referrer || "");
+  if (referrerUrl && /(^|\.)(whatsapp\.com|whatsapp\.net)$/i.test(referrerUrl.hostname)) {
+    return;
+  }
+
   chrome.downloads.cancel(downloadItem.id, () => {
     const lastError = chrome.runtime.lastError;
     if (lastError) {
