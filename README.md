@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>Fast, IDM-inspired download manager for Arch, Ubuntu, Fedora. Built with Rust + Tauri. YouTube, Twitter/X, Reddit, Instagram, TikTok support via yt-dlp.</strong>
+  <strong>Fast, IDM-inspired download manager for Arch, Ubuntu, Fedora. Built with Rust + Tauri. YouTube, Twitter/X, Reddit, TikTok support via yt-dlp.</strong>
 </p>
 
 <p align="center">
@@ -26,7 +26,7 @@
 <details>
 <summary>Türkçe açıklama</summary>
 
-**Linux için IDM tarzı indirme yöneticisi.** Rust + Tauri ile yazıldı, Chromium tarayıcı eklentisi üzerinden çalışır. YouTube, Twitter, Reddit, Instagram, TikTok video indirme desteği `yt-dlp` ile. Arch, Ubuntu, Fedora üzerinde AppImage olarak çalışır. Açık kaynak, ücretsiz, **IDM alternatifi**.
+**Linux için IDM tarzı indirme yöneticisi.** Rust + Tauri ile yazıldı, Chromium tarayıcı eklentisi üzerinden çalışır. YouTube, Twitter, Reddit, TikTok video indirme desteği `yt-dlp` ile. Arch, Ubuntu, Fedora üzerinde AppImage olarak çalışır. Açık kaynak, ücretsiz, **IDM alternatifi**.
 
 Tek komutla kurulum:
 ```bash
@@ -39,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/ekremx25/linux-download-manager/mai
 
 ## What is this?
 
-A lightweight, fast download manager for **Linux** — think **IDM (Internet Download Manager) alternative** for Arch, Ubuntu, Fedora. Integrates directly into Chromium-based browsers (Chrome, Brave, Edge, Vivaldi) through a native messaging bridge and an extension, and lets you download videos from YouTube, Twitter/X, Reddit, Instagram, TikTok and ~1000 more sites through `yt-dlp` with a single click.
+A lightweight, fast download manager for **Linux** — think **IDM (Internet Download Manager) alternative** for Arch, Ubuntu, Fedora. Integrates directly into Chromium-based browsers (Chrome, Brave, Edge, Vivaldi) through a native messaging bridge and an extension, and lets you download videos from YouTube, Twitter/X, Reddit, TikTok and ~1000 more sites through `yt-dlp` with a single click.
 
 **Why this exists:** Linux never got an official IDM port, and most download-manager alternatives are either abandoned, require Wine, or don't integrate with the browser. This one does — a small Rust binary + a Chromium extension + a Tauri GUI, distributed as a single AppImage.
 
@@ -51,7 +51,6 @@ A lightweight, fast download manager for **Linux** — think **IDM (Internet Dow
 | **YouTube** | Yes (360p-4K) | Yes | Player overlay |
 | **Twitter/X** | Yes | Yes | Inline on tweets |
 | **Reddit** | - | Yes | Above video posts |
-| **Instagram** | Yes | Yes | Auto-intercept |
 
 ### Core Features
 - **Multi-segment downloads** - Up to 4 parallel segments for faster downloads
