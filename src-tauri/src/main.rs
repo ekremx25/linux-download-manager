@@ -17,6 +17,14 @@ fn main() {
         if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
             std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
         }
+        // WebKit2GTK 4.1's Wayland path on Arch/Mesa still renders a blank
+        // window even with the two flags above. Route through XWayland, which
+        // runs on every modern Wayland session and works reliably.
+        if std::env::var_os("GDK_BACKEND").is_none()
+            && std::env::var_os("WAYLAND_DISPLAY").is_some()
+        {
+            std::env::set_var("GDK_BACKEND", "x11");
+        }
     }
 
     linux_download_manager::run();
