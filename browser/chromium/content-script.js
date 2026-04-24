@@ -927,23 +927,8 @@ function injectFacebookButtons() {
     const videoContainer = video.closest('[data-video-id], [data-pagelet*="Video"]') || video.parentElement;
     if (!videoContainer) continue;
 
-    let postUrl = null;
-    const permalinkSelectors = [
-      'a[href*="/videos/"]',
-      'a[href*="/reel/"]',
-      'a[href*="/watch/?v="]',
-      'a[href*="fb.watch"]',
-      'a[href*="/share/v/"]',
-      'a[href*="/share/r/"]'
-    ];
-    const links = anchor.querySelectorAll(permalinkSelectors.join(","));
-    for (const link of links) {
-      if (link.href && /^https?:/.test(link.href)) {
-        postUrl = link.href.split("#")[0];
-        break;
-      }
-    }
-    if (!postUrl) postUrl = window.location.href;
+    const postUrl = findFacebookPostUrl(anchor);
+    if (!postUrl) continue;
 
     const btn = document.createElement("div");
     btn.className = "ldm-site-btn";
@@ -975,13 +960,26 @@ function injectFacebookButtons() {
       e.stopPropagation();
       e.stopImmediatePropagation();
 
-      const candidate = {
-        element: video,
-        url: postUrl,
-        kind: "media-fallback"
-      };
-      activeCandidate = candidate;
-      triggerCaptureForCandidate(candidate, btn);
+      showToast("Sending download to Linux Download Manager...", "info");
+      armCaptureTimeout();
+      chrome.runtime.sendMessage({
+        type: "capture-download",
+        payload: {
+          url: postUrl,
+          sourcePageUrl: postUrl,
+          sourceTitle: document.title
+        }
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          clearCaptureTimeout();
+          showToast(chrome.runtime.lastError.message, "error");
+          return;
+        }
+        if (!response?.ok) {
+          clearCaptureTimeout();
+          showToast(response?.error ?? "Download failed.", "error");
+        }
+      });
     }, true);
 
     const parentPos = window.getComputedStyle(videoContainer).position;
@@ -990,6 +988,27 @@ function injectFacebookButtons() {
     }
     videoContainer.appendChild(btn);
   }
+}
+
+function findFacebookPostUrl(anchor) {
+  const permalinkSelectors = [
+    'a[href*="/videos/"]',
+    'a[href*="/reel/"]',
+    'a[href*="/watch/?v="]',
+    'a[href*="fb.watch"]',
+    'a[href*="/share/v/"]',
+    'a[href*="/share/r/"]'
+  ];
+  for (const link of anchor.querySelectorAll(permalinkSelectors.join(","))) {
+    if (link.href && /^https?:/.test(link.href)) {
+      return link.href.split("#")[0];
+    }
+  }
+  const pathname = window.location.pathname;
+  if (/\/(watch|reel|videos|share\/(v|r))\//.test(pathname) || window.location.search.includes("v=")) {
+    return window.location.href.split("#")[0];
+  }
+  return null;
 }
 
 function injectYouTubeButton() {
