@@ -1,22 +1,47 @@
-# Linux Download Manager
+# Linux Download Manager — IDM alternative for Linux
 
 <p align="center">
-  <img src="src-tauri/icons/icon.png" width="128" alt="LDM Icon">
+  <img src="src-tauri/icons/icon.png" width="128" alt="Linux Download Manager icon">
 </p>
 
 <p align="center">
-  <strong>Linux-first IDM-inspired download manager with social media video support</strong>
+  <strong>Fast, IDM-inspired download manager for Arch, Ubuntu, Fedora. Built with Rust + Tauri. YouTube, Facebook, Twitter/X, Reddit, Instagram, TikTok support via yt-dlp.</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/ekremx25/linux-download-manager/releases/latest">Download AppImage</a>
+  <a href="https://github.com/ekremx25/linux-download-manager/releases/latest"><b>⬇ Download AppImage</b></a>
+  &nbsp;·&nbsp;
+  <a href="#install">Install from source</a>
+  &nbsp;·&nbsp;
+  <a href="#troubleshooting">Troubleshooting</a>
 </p>
+
+<p align="center">
+  <a href="https://github.com/ekremx25/linux-download-manager/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ekremx25/linux-download-manager?label=release&color=17A090"></a>
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
+  <img alt="Platform: Linux" src="https://img.shields.io/badge/platform-Linux-1f6feb.svg">
+  <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-orange.svg">
+</p>
+
+<details>
+<summary>Türkçe açıklama</summary>
+
+**Linux için IDM tarzı indirme yöneticisi.** Rust + Tauri ile yazıldı, Chromium tarayıcı eklentisi üzerinden çalışır. YouTube, Facebook, Twitter, Reddit, Instagram, TikTok video indirme desteği `yt-dlp` ile. Arch, Ubuntu, Fedora üzerinde AppImage olarak çalışır. Açık kaynak, ücretsiz, **IDM alternatifi**.
+
+Tek komutla kurulum:
+```bash
+curl -fsSL https://raw.githubusercontent.com/ekremx25/linux-download-manager/main/install.sh | bash
+```
+
+</details>
 
 ---
 
 ## What is this?
 
-A lightweight, fast download manager built with **Rust + Tauri** for Linux. It integrates directly into your browser via a Chromium extension and lets you download videos from popular platforms with a single click.
+A lightweight, fast download manager for **Linux** — think **IDM (Internet Download Manager) alternative** for Arch, Ubuntu, Fedora. Integrates directly into Chromium-based browsers (Chrome, Brave, Edge, Vivaldi) through a native messaging bridge and an extension, and lets you download videos from YouTube, Facebook, Twitter/X, Reddit, Instagram, TikTok and ~1000 more sites through `yt-dlp` with a single click.
+
+**Why this exists:** Linux never got an official IDM port, and most download-manager alternatives are either abandoned, require Wine, or don't integrate with the browser. This one does — a small Rust binary + a Chromium extension + a Tauri GUI, distributed as a single AppImage.
 
 ## Features
 
