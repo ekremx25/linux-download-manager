@@ -797,6 +797,22 @@ function canTryYtdlpPage(pageUrl) {
 }
 
 function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourceTitle) {
+  // X serves some captured video renditions without audio. Download from the
+  // post instead so yt-dlp can select and merge the complete media.
+  if (isTwitterStatusPageUrl(sourcePageUrl)) {
+    return {
+      ok: true,
+      capture: {
+        url: sourcePageUrl,
+        audioUrl: null,
+        sourcePageUrl,
+        sourceTitle,
+        forceYtdlp: true,
+        streamManifest: false
+      }
+    };
+  }
+
   const candidates = getMediaCandidatesForTab(tabId).filter(
     (candidate) => candidate.streamKind !== "fragment"
   );
@@ -906,6 +922,13 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
       streamManifest: videoCandidate.streamKind === "playlist" || videoCandidate.streamKind === "master"
     }
   };
+}
+
+function isTwitterStatusPageUrl(rawUrl) {
+  const url = safeParseUrl(rawUrl);
+  return Boolean(url && /^https?:$/i.test(url.protocol)
+    && /^(?:www\.)?(?:x|twitter)\.com$/i.test(url.hostname)
+    && /\/status\/\d+(?:\/|$)/.test(url.pathname));
 }
 
 function buildMediaRequestHeaders(capturedHeaders, referrerUrl) {

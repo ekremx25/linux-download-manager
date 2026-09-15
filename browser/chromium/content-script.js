@@ -933,7 +933,9 @@ function injectTwitterButtons() {
     let postUrl = null;
     const timeLink = tweet?.querySelector('a[href*="/status/"] time')?.closest("a");
     if (timeLink) postUrl = timeLink.href;
-    else if (/\/status\/\d+/.test(window.location.pathname)) postUrl = window.location.href;
+    else if (tweet?.querySelector('a[href*="/status/"]')) {
+      postUrl = tweet.querySelector('a[href*="/status/"]').href;
+    } else if (/\/status\/\d+/.test(window.location.pathname)) postUrl = window.location.href;
 
     const btn = document.createElement("div");
     btn.className = "ldm-site-btn";

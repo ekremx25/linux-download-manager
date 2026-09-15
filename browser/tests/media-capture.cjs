@@ -14,10 +14,22 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, '../chromium/service-worker
 const page = 'https://yabancidizi.news/dizi/example/sezon-1/bolum-1';
 assert.equal(context.chooseBestMediaCapturePayload(1, null, page, '').ok, false);
 assert.equal(context.canTryYtdlpPage('https://www.youtube.com/watch?v=test'), true);
+const xPost = 'https://x.com/user/status/123';
+let xCapture = context.chooseBestMediaCapturePayload(1, null, xPost, 'X video');
+assert.equal(xCapture.capture.url, xPost);
+assert.equal(xCapture.capture.forceYtdlp, true);
+assert.equal(xCapture.capture.audioUrl, null);
+assert.equal(context.isTwitterStatusPageUrl('https://x.com.evil.test/user/status/123'), false);
+assert.equal(context.isTwitterStatusPageUrl('https://x.com/user'), false);
 const response = (url, mime, statusCode = 200) => listeners['chrome.webRequest.onHeadersReceived']({
   tabId: 1, url, statusCode, initiator: 'https://player.example',
   responseHeaders: [{name: 'Content-Type', value: mime}]
 });
+response('https://video.twimg.com/ext_tw_video/123/pl/avc1/playlist.m3u8', 'application/vnd.apple.mpegurl');
+xCapture = context.chooseBestMediaCapturePayload(1, null, xPost, 'X video');
+assert.equal(xCapture.capture.url, xPost, 'captured video-only rendition must not replace the X post');
+assert.equal(xCapture.capture.forceYtdlp, true);
+listeners['chrome.tabs.onRemoved'](1);
 response('https://cdn.example/opaque-token', 'application/vnd.apple.mpegurl; charset=utf-8');
 let result = context.chooseBestMediaCapturePayload(1, null, page, 'Example');
 assert.equal(result.capture.url, 'https://cdn.example/opaque-token');
