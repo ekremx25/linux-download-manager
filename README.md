@@ -66,6 +66,7 @@ A lightweight, fast download manager for **Linux** — think **IDM (Internet Dow
 - **Close to tray** - Window close minimizes to tray instead of quitting
 - **Desktop notifications** - Download complete/failed alerts
 - **Browser integration** - Chromium extension auto-captures downloads
+- **Generic video capture** - Detects direct video, HLS and DASH streams on other websites and falls back to `yt-dlp` for supported pages
 
 ### Browser Extension
 - **Inline download buttons** on YouTube, Twitter, Reddit videos
@@ -94,45 +95,41 @@ LDM button appears directly on video players - one click to download.
 3. **First run** automatically:
    - Installs native messaging host for browser integration
    - Downloads [yt-dlp](https://github.com/yt-dlp/yt-dlp) to `~/.local/bin/`
-   - Copies browser extension files
+   - Copies browser extension files to `~/Documents/Linux Download Manager Extension/`
    - Opens `chrome://extensions` with setup instructions
 
 4. **Browser extension setup** (one-time):
    - Go to `chrome://extensions`
    - Enable **Developer mode**
-   - Click **Load unpacked** → select `~/.local/share/linux-download-manager/extension/`
+   - Click **Load unpacked** → select `~/Documents/Linux Download Manager Extension/`
 
 ### System Requirements
 - **OS**: Linux (x86_64)
-- **Browser**: Google Chrome, Chromium, or Brave
+- **Browser**: Google Chrome, Chromium, Brave, Edge, or Vivaldi
 - **ffmpeg**: Required for HLS/DASH streams
   ```bash
-  # Arch Linux
+  # Arch Linux / CachyOS
   sudo pacman -S ffmpeg
 
   # Ubuntu/Debian
   sudo apt install ffmpeg
 
   # Fedora
-  sudo dnf install ffmpeg
+  sudo dnf install ffmpeg    # RPM Fusion, or use Fedora's ffmpeg-free
   ```
 
 ### Build from Source
 
 ```bash
-# Prerequisites
-# Rust 1.85+, Node.js (optional), ffmpeg
-
 # Clone
 git clone https://github.com/ekremx25/linux-download-manager.git
 cd linux-download-manager
 
-# Build
-cargo tauri build --bundles appimage
-
-# Or run in development
-cargo tauri dev
+# Install for the current user (Fedora, Arch, CachyOS, Debian/Ubuntu)
+./install.sh
 ```
+
+The installer checks Rust and Tauri's WebKitGTK build libraries, installs missing packages with `dnf`, `pacman`, or `apt` using `sudo`, builds the app, and installs the browser bridge. On Fedora, `ffmpeg-free` is used if RPM Fusion's `ffmpeg` package is unavailable. On Arch and CachyOS, the same `pacman` packages are used. Loading the unpacked extension in the browser remains a one-time manual step.
 
 ## How It Works
 

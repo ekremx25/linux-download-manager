@@ -42,6 +42,7 @@ const MEDIA_SOURCE_ATTRIBUTES = [
   "data-hls",
   "data-mpd"
 ];
+const IMAGE_EXTENSIONS = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp"]);
 const MEDIA_CONTAINER_SELECTOR = [
   '[data-testid*="video" i]',
   '[data-testid*="media" i]',
@@ -60,8 +61,47 @@ let mediaRefreshTimer = null;
 let toastRoot = null;
 let toastTimer = null;
 let captureTimeout = null;
+let lastCaptureRequestAt = 0;
 let lastLocationHref = window.location.href;
 let periodicRefreshHandle = null;
+let pageObserver = null;
+const playerManifests = new Set();
+let extensionDisconnected = false;
+
+function disconnectExtension() {
+  if (extensionDisconnected) return;
+  extensionDisconnected = true;
+  window.clearInterval(periodicRefreshHandle);
+  window.clearTimeout(reportTimer);
+  window.clearTimeout(mediaRefreshTimer);
+  clearCaptureTimeout();
+  pageObserver?.disconnect();
+  hoverButton?.remove();
+  mediaOverlayRoot?.remove();
+  showToast("Eklenti yenilendi. Bu video sayfasını da yenileyin.", "info");
+}
+
+function sendExtensionMessage(message, callback) {
+  if (extensionDisconnected) return;
+  try {
+    if (!chrome.runtime?.id) { disconnectExtension(); return; }
+    chrome.runtime.sendMessage(message, (response) => {
+      const error = chrome.runtime.lastError;
+      if (error && /context invalidated/i.test(error.message ?? "")) {
+        disconnectExtension();
+        return;
+      }
+      if (callback) callback(response);
+    });
+  } catch (error) {
+    if (/context invalidated/i.test(error.message ?? "")) {
+      disconnectExtension();
+      return;
+    }
+    clearCaptureTimeout();
+    showToast("Eklenti mesajı gönderilemedi: " + error.message, "error");
+  }
+}
 
 bootstrap();
 
@@ -70,9 +110,34 @@ function isExcludedHost(hostname) {
 }
 
 function bootstrap() {
+  if (/(^|\.)molystream\.org$/i.test(window.location.hostname)) {
+    window.addEventListener("message", (event) => {
+      if (event.source !== window || event.data?.type !== "ldm-player-manifest") return;
+      const url = normalizeUrl(event.data.url);
+      if (!url || playerManifests.has(url)) return;
+      playerManifests.add(url);
+      if (playerManifests.size > 12) playerManifests.delete(playerManifests.values().next().value);
+      reportObservedMediaCandidates();
+    });
+    window.postMessage({type: "ldm-request-player-manifests"}, window.location.origin);
+  }
   if (isExcludedHost(window.location.hostname)) {
     return;
   }
+
+  // Embedded players run this script too so their media can still be reported,
+  // but only the top-level page should render controls. Otherwise every iframe
+  // adds its own LDM button over the same visible player.
+  if (window !== window.top) {
+    scheduleCandidateReport();
+    observePageChanges();
+    reportObservedMediaCandidates();
+    periodicRefreshHandle = window.setInterval(reportObservedMediaCandidates, 1200);
+    document.addEventListener("loadedmetadata", handleMediaSignal, true);
+    document.addEventListener("play", handleMediaSignal, true);
+    return;
+  }
+
   createHoverButton();
   createMediaOverlay();
   createToastRoot();
@@ -108,7 +173,8 @@ function bootstrap() {
 }
 
 function createHoverButton() {
-  if (hoverButton) {
+  // Sites with their own download control do not need a generic hover button.
+  if (hasInlineButtons() || hoverButton) {
     return;
   }
 
@@ -307,7 +373,7 @@ function triggerCaptureWithFormat(candidate, format) {
   const sourcePageUrl = resolveSourcePageUrl(candidate);
 
   if (candidate.kind === "media" || candidate.kind === "media-fallback") {
-    chrome.runtime.sendMessage({
+    sendExtensionMessage({
       type: "capture-best-media",
       payload: {
         preferredUrl: candidate.url ?? null,
@@ -316,8 +382,8 @@ function triggerCaptureWithFormat(candidate, format) {
         format: format ?? null
       }
     }, (response) => {
+      clearCaptureTimeout();
       if (chrome.runtime.lastError) {
-        clearCaptureTimeout();
         showToast(chrome.runtime.lastError.message, "error");
         return;
       }
@@ -331,7 +397,7 @@ function triggerCaptureWithFormat(candidate, format) {
     return;
   }
 
-  chrome.runtime.sendMessage({
+  sendExtensionMessage({
     type: "capture-download",
     payload: {
       url: candidate.url,
@@ -367,6 +433,16 @@ function triggerCaptureForCandidate(candidate, anchorElement) {
   triggerCaptureWithFormat(candidate, null);
 }
 
+function triggerCaptureOnce(candidate, anchorElement) {
+  const now = Date.now();
+  if (now - lastCaptureRequestAt < 2000) {
+    return;
+  }
+
+  lastCaptureRequestAt = now;
+  triggerCaptureForCandidate(candidate, anchorElement);
+}
+
 function pulseHoverButton() {
   if (!hoverButton) {
     return;
@@ -379,6 +455,10 @@ function pulseHoverButton() {
 }
 
 function repositionHoverButton() {
+  if (mediaOverlayRoot?.childElementCount > 0) {
+    if (hoverButton) hoverButton.hidden = true;
+    return;
+  }
   if (!hoverButton || !activeCandidate) {
     hideHoverButton();
     return;
@@ -459,7 +539,7 @@ function isEventInsideActiveCandidate(event) {
 }
 
 function observePageChanges() {
-  const observer = new MutationObserver(() => {
+  const observer = pageObserver = new MutationObserver(() => {
     detectLocationChange();
     scheduleCandidateReport();
     scheduleMediaRefresh();
@@ -526,6 +606,7 @@ function startPeriodicRefresh() {
 }
 
 function scheduleMediaRefresh() {
+  if (extensionDisconnected) return;
   window.setTimeout(() => {
     reportObservedMediaCandidates();
     refreshRecentMediaCandidates();
@@ -533,6 +614,7 @@ function scheduleMediaRefresh() {
 }
 
 function scheduleMediaOverlayRefresh() {
+  if (extensionDisconnected) return;
   if (mediaRefreshTimer) {
     window.clearTimeout(mediaRefreshTimer);
   }
@@ -544,13 +626,14 @@ function scheduleMediaOverlayRefresh() {
 }
 
 function scheduleCandidateReport() {
+  if (extensionDisconnected) return;
   if (reportTimer) {
     window.clearTimeout(reportTimer);
   }
 
   reportTimer = window.setTimeout(() => {
     reportTimer = null;
-    chrome.runtime.sendMessage({
+    sendExtensionMessage({
       type: "candidate-count",
       count: countCandidates()
     });
@@ -686,34 +769,35 @@ function refreshMediaOverlay() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "ldm-media-button";
-    button.textContent = "Download";
+    button.textContent = "⬇ LDM İndir";
     if (target.pinned) {
-      button.classList.add("ldm-media-button-floating");
-      button.style.top = "18px";
-      button.style.right = "86px";
-      button.style.left = "auto";
+      // Without a player anchor, a floating button could cover the video.
+      continue;
     } else {
       const rect = target.element.getBoundingClientRect();
       if (!isVisibleMediaRect(rect)) {
         continue;
       }
 
-      button.style.top = `${Math.max(12, rect.top + 12)}px`;
-      button.style.left = `${Math.max(12, rect.right - 108)}px`;
-      button.style.right = "auto";
+      button.style.setProperty("top", `${rect.top - 8}px`, "important");
+      button.style.setProperty("left", `${rect.right - 8}px`, "important");
+      button.style.setProperty("transform", "translate(-100%, -100%)", "important");
+      button.style.setProperty("right", "auto", "important");
     }
 
     button.addEventListener("pointerdown", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      activeCandidate = target.candidate;
+      triggerCaptureOnce(target.candidate, button);
     });
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      activeCandidate = target.candidate;
-      triggerCaptureForCandidate(target.candidate, button);
     });
     mediaOverlayRoot.appendChild(button);
+    if (hoverButton) hoverButton.hidden = true;
+    break;
   }
 }
 
@@ -809,7 +893,7 @@ function injectRedditButtons() {
 
         showToast("Sending download to Linux Download Manager...", "info");
         armCaptureTimeout();
-        chrome.runtime.sendMessage({
+        sendExtensionMessage({
           type: "capture-download",
           payload: {
             url: hlsUrl,
@@ -837,22 +921,19 @@ function injectRedditButtons() {
 }
 
 function injectTwitterButtons() {
-  const tweets = document.querySelectorAll("article");
-  for (const tweet of tweets) {
-    if (tweet.querySelector(".ldm-site-btn")) continue;
-
-    const video = tweet.querySelector("video");
-    if (!video || !(video instanceof HTMLMediaElement)) continue;
-
+  for (const video of document.querySelectorAll("video")) {
     const videoContainer = video.closest('[data-testid="videoComponent"], [data-testid="videoPlayer"]') || video.parentElement;
-    if (tweet.closest("[data-testid]")?.querySelector(".ldm-site-btn")) continue;
+    if (!videoContainer || videoContainer.querySelector(".ldm-site-btn")) continue;
+
+    const tweet = video.closest("article");
 
     const rect = video.getBoundingClientRect();
     if (rect.width < 80 || rect.height < 60) continue;
 
     let postUrl = null;
-    const timeLink = tweet.querySelector('a[href*="/status/"] time')?.closest("a");
+    const timeLink = tweet?.querySelector('a[href*="/status/"] time')?.closest("a");
     if (timeLink) postUrl = timeLink.href;
+    else if (/\/status\/\d+/.test(window.location.pathname)) postUrl = window.location.href;
 
     const btn = document.createElement("div");
     btn.className = "ldm-site-btn";
@@ -884,8 +965,8 @@ function injectTwitterButtons() {
       e.stopPropagation();
       e.stopImmediatePropagation();
 
-      const tweetText = tweet.querySelector('[data-testid="tweetText"]')?.textContent?.trim();
-      const userName = tweet.querySelector('[data-testid="User-Name"] a')?.textContent?.trim();
+      const tweetText = tweet?.querySelector('[data-testid="tweetText"]')?.textContent?.trim();
+      const userName = tweet?.querySelector('[data-testid="User-Name"] a')?.textContent?.trim();
       const title = tweetText
         ? (tweetText.length > 80 ? tweetText.substring(0, 80) : tweetText)
         : (userName ? `${userName} video` : null);
@@ -920,7 +1001,7 @@ function injectYouTubeButton() {
   btn.setAttribute("style", `
     position: absolute !important;
     top: 12px !important;
-    right: 12px !important;
+    left: 12px !important;
     z-index: 2147483647 !important;
     background: linear-gradient(135deg, #3dd29f, #86e8ff) !important;
     color: #04110d !important;
@@ -1448,11 +1529,13 @@ function resolvePersistentMediaCandidate() {
 }
 
 function isDownloadableLink(link, url) {
+  const normalized = normalizeUrl(url);
+  if (!normalized) return false;
   if (link.hasAttribute("download")) {
     return true;
   }
 
-  const parsedUrl = new URL(url);
+  const parsedUrl = new URL(normalized);
   if (parsedUrl.searchParams.has("download")) {
     return true;
   }
@@ -1462,13 +1545,15 @@ function isDownloadableLink(link, url) {
 }
 
 function isMediaCandidate(url) {
-  const parsedUrl = new URL(url);
+  const normalized = normalizeUrl(url);
+  if (!normalized) return false;
+  const parsedUrl = new URL(normalized);
   const extension = parsedUrl.pathname.toLowerCase().split(".").pop();
   return DOWNLOADABLE_EXTENSIONS.has(extension) || ["m3u8", "mpd", "m4s", "ts", "aac"].includes(extension);
 }
 
 function refreshRecentMediaCandidates() {
-  chrome.runtime.sendMessage({ type: "get-media-candidates" }, (response) => {
+  sendExtensionMessage({ type: "get-media-candidates" }, (response) => {
     if (chrome.runtime.lastError) {
       return;
     }
@@ -1484,17 +1569,38 @@ function refreshRecentMediaCandidates() {
 }
 
 function reportObservedMediaCandidates() {
+  if (extensionDisconnected) return;
+  sendExtensionMessage({type: "capture-diagnostic-frame",
+    media: Array.from(document.querySelectorAll("video, audio")).map(m => ({
+      src: m.currentSrc || m.src, readyState: m.readyState, paused: m.paused})),
+    embeds: Array.from(document.querySelectorAll("iframe")).map(f => f.src),
+    resourceCount: performance.getEntriesByType("resource").length
+  }, () => void chrome.runtime.lastError);
   const candidates = [];
   const seen = new Set();
+  const referrerUrl = window.location.href;
+  const observedHeaders = {
+    "referer": referrerUrl,
+    "user-agent": navigator.userAgent,
+    "accept": "*/*"
+  };
+  if (window.location.origin && window.location.origin !== "null") {
+    observedHeaders.origin = window.location.origin;
+  }
 
   const remember = (url, type = "observed") => {
     const normalized = normalizeUrl(url);
-    if (!normalized || seen.has(normalized) || !isLikelyObservedMediaUrl(normalized)) {
+    if (!normalized || seen.has(normalized) || (!["media", "audio"].includes(type) && !isLikelyObservedMediaUrl(normalized))) {
       return;
     }
 
     seen.add(normalized);
-    candidates.push({ url: normalized, type });
+    candidates.push({
+      url: normalized,
+      type,
+      referrerUrl,
+      httpHeaders: observedHeaders
+    });
   };
 
   for (const mediaElement of document.querySelectorAll("video, audio")) {
@@ -1502,16 +1608,17 @@ function reportObservedMediaCandidates() {
       continue;
     }
 
-    remember(mediaElement.currentSrc, "observed");
-    remember(mediaElement.src, "observed");
+    const mediaType = mediaElement.tagName === "AUDIO" ? "audio" : "media";
+    remember(mediaElement.currentSrc, mediaType);
+    remember(mediaElement.src, mediaType);
 
     for (const source of mediaElement.querySelectorAll("source")) {
       if (!(source instanceof HTMLSourceElement)) {
         continue;
       }
 
-      remember(source.src, "observed");
-      remember(source.getAttribute("src"), "observed");
+      remember(source.src, mediaType);
+      remember(source.getAttribute("src"), mediaType);
     }
   }
 
@@ -1526,11 +1633,12 @@ function reportObservedMediaCandidates() {
     }
   }
 
-  if (candidates.length === 0) {
-    return;
+  for (const url of playerManifests) {
+    candidates.unshift({url, type: "observed-manifest", referrerUrl, httpHeaders: observedHeaders});
   }
+  if (candidates.length === 0) return;
 
-  chrome.runtime.sendMessage({
+  sendExtensionMessage({
     type: "remember-media-candidates",
     candidates: candidates.slice(0, 24)
   }, () => void chrome.runtime.lastError);
@@ -1545,6 +1653,9 @@ function isLikelyObservedMediaUrl(url) {
 
     const pathname = parsedUrl.pathname.toLowerCase();
     const extension = pathname.split(".").pop();
+    if (IMAGE_EXTENSIONS.has(extension)) {
+      return false;
+    }
     if (DOWNLOADABLE_EXTENSIONS.has(extension) || ["m3u8", "mpd", "m4s", "ts", "aac", "m3u"].includes(extension)) {
       return true;
     }
@@ -1558,7 +1669,7 @@ function isLikelyObservedMediaUrl(url) {
       return true;
     }
 
-    if (/\/(videoplayback|manifest|playlist|master|video|hls|dash)\b/i.test(pathname)) {
+    if (/\/(videoplayback|manifest|playlist|master|hls|dash)\b/i.test(pathname)) {
       return true;
     }
 

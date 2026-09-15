@@ -85,6 +85,9 @@ pub fn run_first_time_setup() {
         format!("{home}/.config/google-chrome/NativeMessagingHosts"),
         format!("{home}/.config/chromium/NativeMessagingHosts"),
         format!("{home}/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+        format!("{home}/.config/microsoft-edge-dev/NativeMessagingHosts"),
+        format!("{home}/.config/microsoft-edge/NativeMessagingHosts"),
+        format!("{home}/.config/vivaldi/NativeMessagingHosts"),
     ];
 
     for dir in &browser_dirs {
@@ -108,6 +111,9 @@ fn detect_extension_id(home: &str) -> String {
         format!("{home}/.config/google-chrome/NativeMessagingHosts"),
         format!("{home}/.config/chromium/NativeMessagingHosts"),
         format!("{home}/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+        format!("{home}/.config/microsoft-edge-dev/NativeMessagingHosts"),
+        format!("{home}/.config/microsoft-edge/NativeMessagingHosts"),
+        format!("{home}/.config/vivaldi/NativeMessagingHosts"),
     ];
 
     for dir in &browser_dirs {
@@ -117,7 +123,7 @@ fn detect_extension_id(home: &str) -> String {
                 let rest = &content[start + 19..];
                 if let Some(end) = rest.find('/') {
                     let id = &rest[..end];
-                    if !id.is_empty() && id != "__EXTENSION_ORIGIN__" {
+                    if !id.is_empty() && id != "unknown" && id != "__EXTENSION_ORIGIN__" {
                         return id.to_string();
                     }
                 }
@@ -125,7 +131,7 @@ fn detect_extension_id(home: &str) -> String {
         }
     }
 
-    "unknown".to_string()
+    "dhbkcopeagecbkoncdjefnjlcienhlpg".to_string()
 }
 
 fn install_browser_extension(exe_dir: &Path, app_data: &Path, home: &str) {
@@ -166,7 +172,7 @@ fn install_browser_extension(exe_dir: &Path, app_data: &Path, home: &str) {
 
     let _ = fs::create_dir_all(&ext_dest);
 
-    let files = ["manifest.json", "service-worker.js", "content-script.js", "content-style.css"];
+    let files = ["manifest.json", "service-worker.js", "player-manifest-observer.js", "content-script.js", "content-style.css"];
     for file in &files {
         let src = source_dir.join(file);
         let dst = ext_dest.join(file);
@@ -184,6 +190,9 @@ fn install_browser_extension(exe_dir: &Path, app_data: &Path, home: &str) {
         ("chromium-browser", format!("{home}/.config/chromium")),
         ("brave-browser", format!("{home}/.config/BraveSoftware/Brave-Browser")),
         ("brave", format!("{home}/.config/BraveSoftware/Brave-Browser")),
+        ("microsoft-edge-dev", format!("{home}/.config/microsoft-edge-dev")),
+        ("microsoft-edge", format!("{home}/.config/microsoft-edge")),
+        ("vivaldi", format!("{home}/.config/vivaldi")),
     ];
 
     // Open the extensions page on whichever Chromium-based browser the user

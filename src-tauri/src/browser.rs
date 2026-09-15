@@ -1,5 +1,6 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -10,14 +11,22 @@ const INBOX_DIR_NAME: &str = "browser-inbox";
 #[serde(rename_all = "camelCase")]
 pub struct BrowserDownloadRequest {
     pub url: String,
+    #[serde(default)]
+    pub fallback_urls: Vec<String>,
     pub audio_url: Option<String>,
     pub save_dir: Option<String>,
     pub expected_checksum: Option<String>,
     pub scheduled_at: Option<String>,
     pub bandwidth_limit_kbps: Option<u64>,
     pub source_page_url: Option<String>,
+    #[serde(default)]
+    pub http_headers: HashMap<String, String>,
     pub source_title: Option<String>,
     pub format: Option<String>,
+    #[serde(default)]
+    pub force_ytdlp: bool,
+    #[serde(default)]
+    pub stream_manifest: bool,
     pub created_at: String,
 }
 
@@ -28,25 +37,33 @@ pub struct StagedBrowserRequest {
 
 pub fn new_browser_download_request(
     url: String,
+    fallback_urls: Vec<String>,
     audio_url: Option<String>,
     save_dir: Option<String>,
     expected_checksum: Option<String>,
     scheduled_at: Option<String>,
     bandwidth_limit_kbps: Option<u64>,
     source_page_url: Option<String>,
+    http_headers: HashMap<String, String>,
     source_title: Option<String>,
     format: Option<String>,
+    force_ytdlp: bool,
+    stream_manifest: bool,
 ) -> BrowserDownloadRequest {
     BrowserDownloadRequest {
         url,
+        fallback_urls,
         audio_url,
         save_dir,
         expected_checksum,
         scheduled_at,
         bandwidth_limit_kbps,
         source_page_url,
+        http_headers,
         source_title,
         format,
+        force_ytdlp,
+        stream_manifest,
         created_at: Utc::now().to_rfc3339(),
     }
 }

@@ -38,8 +38,29 @@ const DOWNLOADABLE_EXTENSIONS = new Set([
   "zip"
 ]);
 const STREAMING_EXTENSIONS = new Set(["m3u8", "mpd", "m4s", "ts", "aac", "m3u"]);
+const IMAGE_EXTENSIONS = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp"]);
 const recentCaptures = new Map();
 const recentMediaByTab = new Map();
+const captureDiagnostics = new Map();
+function diagnosticUrl(raw) {
+  try { const u = new URL(raw); return { origin: u.origin, protocol: u.protocol,
+    extension: u.pathname.match(/\.([a-z0-9]{1,8})$/i)?.[1] ?? "none" }; }
+  catch { return { protocol: "unknown" }; }
+}
+function diagnosticState(tabId) {
+  if (!captureDiagnostics.has(tabId)) captureDiagnostics.set(tabId, { frames: {}, requests: [] });
+  return captureDiagnostics.get(tabId);
+}
+function saveCaptureDiagnostic(tabId, page) {
+  const state = diagnosticState(tabId);
+  const report = {version: chrome.runtime.getManifest().version,
+    page: diagnosticUrl(page), ...state,
+    candidates: getMediaCandidatesForTab(tabId).map(c => ({...diagnosticUrl(c.url), kind: c.streamKind, type: c.type}))};
+  chrome.downloads.download({
+    url: "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(report, null, 2)),
+    filename: "LDM-capture-diagnostic.json", conflictAction: "uniquify", saveAs: false
+  }, () => void chrome.runtime.lastError);
+}
 
 chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOR });
 
@@ -64,11 +85,17 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.action.onClicked.addListener((tab) => {
-  sendToNativeHost({
-    url: tab?.url,
-    sourcePageUrl: tab?.url,
-    sourceTitle: tab?.title ?? null
-  });
+  const payload = chooseBestMediaCapturePayload(
+    tab?.id,
+    null,
+    tab?.url,
+    tab?.title ?? null
+  );
+  if (payload?.ok) {
+    queueNativeCapture(payload.capture, tab?.id);
+  } else {
+    notifyTab(tab?.id, "error", payload?.error ?? "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin.");
+  }
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
@@ -82,11 +109,17 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 
   if (info.menuItemId === MENU_DOWNLOAD_PAGE) {
-    sendToNativeHost({
-      url: tab?.url,
-      sourcePageUrl: tab?.url ?? null,
-      sourceTitle: tab?.title ?? null
-    });
+    const payload = chooseBestMediaCapturePayload(
+      tab?.id,
+      null,
+      tab?.url ?? null,
+      tab?.title ?? null
+    );
+    if (payload?.ok) {
+      queueNativeCapture(payload.capture, tab?.id);
+    } else {
+      notifyTab(tab?.id, "error", payload?.error ?? "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin.");
+    }
     return;
   }
 
@@ -102,6 +135,18 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const tabId = sender.tab?.id;
 
+  if (message?.type === "capture-diagnostic-frame") {
+    if (typeof tabId === "number" && tabId >= 0) {
+      diagnosticState(tabId).frames[sender.frameId ?? 0] = {
+        location: diagnosticUrl(sender.url), seenAt: Date.now(),
+        media: (message.media ?? []).slice(0, 12).map(m => ({source: diagnosticUrl(m.src), readyState: m.readyState, paused: m.paused})),
+        embeds: (message.embeds ?? []).slice(0, 12).map(diagnosticUrl),
+        resourceCount: message.resourceCount
+      };
+    }
+    sendResponse({ok: true});
+    return;
+  }
   if (message?.type === "candidate-count") {
     updateBadge(tabId, message.count);
     sendResponse({ ok: true });
@@ -123,7 +168,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           continue;
         }
 
-        rememberMediaRequest(tabId, candidate.url, candidate.type ?? "observed");
+        rememberMediaRequest(
+          tabId,
+          candidate.url,
+          candidate.type ?? "observed",
+          candidate.referrerUrl ?? sender.url ?? null,
+          candidate.httpHeaders ?? {},
+          true
+        );
       }
     }
 
@@ -137,7 +189,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         url: message.payload?.url,
         sourcePageUrl: message.payload?.sourcePageUrl ?? sender.tab?.url ?? null,
         sourceTitle: message.payload?.sourceTitle ?? sender.tab?.title ?? null,
-        format: message.payload?.format ?? null
+        format: message.payload?.format ?? null,
+        forceYtdlp: message.payload?.forceYtdlp ?? false,
+        streamManifest: message.payload?.streamManifest ?? isManifestUrl(message.payload?.url)
       },
       tabId
     );
@@ -155,8 +209,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!payload?.ok) {
       sendResponse({
         ok: false,
-        error: payload?.error ?? "No captured media stream found for this tab yet."
+        error: payload?.error ?? "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin."
       });
+      try { saveCaptureDiagnostic(tabId, sender.tab?.url); }
+      catch (error) { console.warn("LDM diagnostic export failed", error); }
       return;
     }
 
@@ -173,6 +229,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  recentMediaByTab.delete(tabId);
+  captureDiagnostics.delete(tabId);
+  chrome.action.setBadgeText({ tabId, text: "" });
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (!changeInfo.url && changeInfo.status !== "loading") {
+    return;
+  }
+
+  recentMediaByTab.delete(tabId);
+  captureDiagnostics.delete(tabId);
   chrome.action.setBadgeText({ tabId, text: "" });
 });
 
@@ -231,10 +299,92 @@ chrome.webRequest.onBeforeRequest.addListener(
       return;
     }
 
-    rememberMediaRequest(details.tabId, details.url, details.type);
+    rememberMediaRequest(
+      details.tabId,
+      details.url,
+      details.type,
+      details.documentUrl || details.initiator || null
+    );
   },
   { urls: ["<all_urls>"], types: ["media", "xmlhttprequest"] }
 );
+
+// MIME evidence also identifies extensionless stream URLs.
+chrome.webRequest.onHeadersReceived.addListener((details) => {
+  if (details.tabId < 0) return;
+  const mime = (details.responseHeaders ?? []).find(
+    (header) => header.name?.toLowerCase() === "content-type"
+  )?.value?.split(";")[0].trim().toLowerCase() ?? "";
+  const diagnostic = diagnosticState(details.tabId);
+  diagnostic.requests.push({...diagnosticUrl(details.url), frameId: details.frameId,
+    type: details.type, mime, status: details.statusCode});
+  diagnostic.requests = diagnostic.requests.slice(-80);
+  if (details.statusCode < 200 || details.statusCode >= 300) return;
+  const manifest = ["application/vnd.apple.mpegurl", "application/x-mpegurl",
+    "audio/mpegurl", "audio/x-mpegurl", "application/dash+xml"].includes(mime);
+  const fragment = ["video/mp2t", "video/iso.segment", "audio/iso.segment"].includes(mime);
+  if (!manifest && !fragment && !/^(video|audio)\//.test(mime)) return;
+  rememberMediaRequest(details.tabId, details.url,
+    mime.startsWith("audio/") ? "audio" : "media", details.initiator ?? null);
+  const candidate = (recentMediaByTab.get(details.tabId) ?? []).find(
+    (item) => item.url === normalizeMediaCandidateUrl(details.url));
+  if (candidate) {
+    candidate.streamKind = candidate.bodyClassified ? "playlist" : manifest ? "playlist" : fragment ? "fragment"
+      : ["unknown", "page"].includes(candidate.streamKind)
+      ? (mime.startsWith("audio/") ? "audio" : "video") : candidate.streamKind;
+    candidate.score = manifest ? 120 : fragment ? 30 : candidate.score;
+    candidate.mimeClassified = true;
+    recentMediaByTab.get(details.tabId).sort((a, b) => b.score - a.score || b.seenAt - a.seenAt);
+  }
+}, { urls: ["<all_urls>"], types: ["media", "xmlhttprequest"] }, ["responseHeaders"]);
+
+function captureMediaRequestHeaders(details) {
+    if (typeof details.tabId !== "number" || details.tabId < 0) {
+      return;
+    }
+
+    if (!shouldRememberMediaRequest(details.url, details.type)) {
+      return;
+    }
+
+    const headers = details.requestHeaders ?? [];
+    const headerValue = (name) => headers.find(
+      (header) => header.name?.toLowerCase() === name
+    )?.value;
+    const requestContext = headerValue("referer")
+      || headerValue("origin")
+      || details.initiator
+      || null;
+    const requestHeaders = {};
+    for (const name of [
+      "referer", "origin", "cookie", "accept", "accept-language", "user-agent",
+      "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+      "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site"
+    ]) {
+      const value = headerValue(name);
+      if (value) {
+        requestHeaders[name] = value;
+      }
+    }
+
+    rememberMediaRequest(details.tabId, details.url, details.type, requestContext, requestHeaders);
+}
+
+const mediaHeaderFilter = { urls: ["<all_urls>"], types: ["media", "xmlhttprequest"] };
+try {
+  chrome.webRequest.onBeforeSendHeaders.addListener(
+    captureMediaRequestHeaders,
+    mediaHeaderFilter,
+    ["requestHeaders", "extraHeaders"]
+  );
+} catch (error) {
+  console.warn("extraHeaders is unavailable; using standard request headers.", error);
+  chrome.webRequest.onBeforeSendHeaders.addListener(
+    captureMediaRequestHeaders,
+    mediaHeaderFilter,
+    ["requestHeaders"]
+  );
+}
 
 function sendToNativeHost(payload, tabId) {
   if (!payload?.url || !/^https?:/i.test(payload.url)) {
@@ -286,7 +436,12 @@ function sendToNativeHost(payload, tabId) {
 }
 
 function queueNativeCapture(payload, tabId) {
-  sendToNativeHost(payload, tabId).then((response) => {
+  if (payload?.url && wasRecentlyCaptured(payload.url)) {
+    notifyTab(tabId, "info", "Download is already queued in Linux Download Manager.");
+    return;
+  }
+
+  enrichCaptureWithMediaCookies(payload, tabId).then((enrichedPayload) => sendToNativeHost(enrichedPayload, tabId)).then((response) => {
     if (response?.ok) {
       notifyTab(tabId, "success", "Download queued in Linux Download Manager.");
       return;
@@ -294,6 +449,50 @@ function queueNativeCapture(payload, tabId) {
 
     notifyTab(tabId, "error", response?.error ?? "Download request failed.");
   });
+}
+
+async function enrichCaptureWithMediaCookies(payload, tabId) {
+  if (!payload?.url || !chrome.cookies?.getAll) {
+    return payload;
+  }
+
+  const headers = { ...(payload.httpHeaders ?? {}) };
+  const collected = [];
+  const seen = new Set();
+  const appendCookies = (cookies) => {
+    for (const cookie of cookies ?? []) {
+      const key = `${cookie.name}\u0000${cookie.domain}\u0000${cookie.path}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        collected.push(cookie);
+      }
+    }
+  };
+
+  try {
+    appendCookies(await chrome.cookies.getAll({ url: payload.url }));
+  } catch (error) {
+    console.warn("Could not read media cookies.", error);
+  }
+
+  try {
+    const tab = typeof tabId === "number" ? await chrome.tabs.get(tabId) : null;
+    const topPage = safeParseUrl(tab?.url ?? "");
+    if (topPage) {
+      appendCookies(await chrome.cookies.getAll({
+        url: payload.url,
+        partitionKey: { topLevelSite: topPage.origin }
+      }));
+    }
+  } catch (error) {
+    console.info("No partitioned media cookies were available.", error);
+  }
+
+  if (collected.length > 0) {
+    headers.cookie = collected.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+  }
+
+  return { ...payload, httpHeaders: headers };
 }
 
 function shouldCaptureUrl(rawUrl, hintName = "") {
@@ -345,17 +544,20 @@ function shouldRememberMediaRequest(rawUrl, type) {
     return false;
   }
 
-  if (type === "media") {
-    return true;
-  }
-
+  if (type === "observed-manifest") return true;
   const pathname = parsedUrl.pathname.toLowerCase();
   const extension = pathname.split(".").pop();
+  if (IMAGE_EXTENSIONS.has(extension)) {
+    return false;
+  }
+  if (type === "media" || type === "audio") {
+    return true;
+  }
   if (DOWNLOADABLE_EXTENSIONS.has(extension) || STREAMING_EXTENSIONS.has(extension)) {
     return true;
   }
 
-  if (/\/(videoplayback|manifest|playlist|master|video|hls|dash)\b/i.test(pathname)) {
+  if (/\/(videoplayback|manifest|playlist|master|hls|dash)\b/i.test(pathname)) {
     return true;
   }
 
@@ -366,7 +568,25 @@ function shouldRememberMediaRequest(rawUrl, type) {
   return /(^|\.)(fbcdn\.net|cdninstagram\.com)$/i.test(parsedUrl.hostname);
 }
 
-function rememberMediaRequest(tabId, url, type) {
+function isDisguisedHlsManifest(parsedUrl) {
+  const pathname = parsedUrl.pathname.toLowerCase();
+  return /\/hls\//.test(pathname) && /\/(master|index|playlist)\.(txt|php|json)$/.test(pathname);
+}
+
+function isManifestUrl(rawUrl) {
+  const parsedUrl = safeParseUrl(rawUrl);
+  if (!parsedUrl) {
+    return false;
+  }
+
+  const pathname = parsedUrl.pathname.toLowerCase();
+  return pathname.endsWith(".m3u8")
+    || pathname.endsWith(".m3u")
+    || pathname.endsWith(".mpd")
+    || isDisguisedHlsManifest(parsedUrl);
+}
+
+function rememberMediaRequest(tabId, url, type, referrerUrl = null, requestHeaders = {}, observed = false) {
   const normalizedUrl = normalizeMediaCandidateUrl(url);
   if (!normalizedUrl) {
     return;
@@ -374,14 +594,23 @@ function rememberMediaRequest(tabId, url, type) {
 
   const candidates = recentMediaByTab.get(tabId) ?? [];
   const now = Date.now();
+  const existingCandidate = candidates.find((candidate) => candidate.url === normalizedUrl);
   const nextCandidates = candidates.filter((candidate) => now - candidate.seenAt < 120000 && candidate.url !== normalizedUrl);
   nextCandidates.unshift({
     url: normalizedUrl,
     type,
     seenAt: now,
-    score: scoreMediaCandidate(url, type),
-    streamKind: classifyMediaCandidate(url, type),
-    groupKey: deriveMediaGroupKey(url)
+    score: ((existingCandidate?.mimeClassified || existingCandidate?.bodyClassified) && type !== "observed-manifest") ? existingCandidate.score : scoreMediaCandidate(url, type),
+    streamKind: ((existingCandidate?.mimeClassified || existingCandidate?.bodyClassified) && type !== "observed-manifest") ? existingCandidate.streamKind : classifyMediaCandidate(url, type),
+    mimeClassified: existingCandidate?.mimeClassified ?? false,
+    bodyClassified: type === "observed-manifest" || existingCandidate?.bodyClassified || false,
+    groupKey: deriveMediaGroupKey(url),
+    referrerUrl: normalizePageUrl(referrerUrl) ?? existingCandidate?.referrerUrl ?? null,
+    httpHeaders: observed
+      ? { ...requestHeaders, ...(existingCandidate?.httpHeaders ?? {}) }
+      : Object.keys(requestHeaders).length > 0
+      ? requestHeaders
+      : (existingCandidate?.httpHeaders ?? {})
   });
   nextCandidates.sort((left, right) => right.score - left.score || right.seenAt - left.seenAt);
   recentMediaByTab.set(tabId, nextCandidates.slice(0, MAX_MEDIA_CANDIDATES));
@@ -398,10 +627,23 @@ function getMediaCandidatesForTab(tabId) {
   if (fresh.length !== candidates.length) {
     recentMediaByTab.set(tabId, fresh);
   }
-  return fresh.map(({ url, type, streamKind, groupKey }) => ({ url, type, streamKind, groupKey }));
+  return fresh.map(({ url, type, streamKind, groupKey, referrerUrl, httpHeaders }) => ({
+    url,
+    type,
+    streamKind,
+    groupKey,
+    referrerUrl,
+    httpHeaders: httpHeaders ?? {}
+  }));
+}
+
+function normalizePageUrl(rawUrl) {
+  const parsedUrl = safeParseUrl(rawUrl);
+  return parsedUrl && /^https?:$/i.test(parsedUrl.protocol) ? parsedUrl.toString() : null;
 }
 
 function scoreMediaCandidate(url, type) {
+  if (type === "observed-manifest") return 125;
   const parsedUrl = safeParseUrl(url);
   if (!parsedUrl) {
     return 0;
@@ -411,6 +653,12 @@ function scoreMediaCandidate(url, type) {
   const facebookMetadata = parseFacebookEfgMetadata(parsedUrl);
   const twitterKind = classifyTwitterMediaKind(parsedUrl);
   const extension = parsedUrl.pathname.toLowerCase().split(".").pop();
+  if (IMAGE_EXTENSIONS.has(extension)) {
+    return -100;
+  }
+  if (isDisguisedHlsManifest(parsedUrl)) {
+    return 122;
+  }
   if (extension === "m3u8") {
     if (twitterKind === "audio") {
       return 32;
@@ -535,33 +783,40 @@ function normalizeMediaCandidateUrl(rawUrl) {
     return null;
   }
 
-  parsedUrl.searchParams.delete("bytestart");
-  parsedUrl.searchParams.delete("byteend");
+  if (parsedUrl.searchParams.has("bytestart") || parsedUrl.searchParams.has("byteend")) {
+    parsedUrl.searchParams.delete("bytestart");
+    parsedUrl.searchParams.delete("byteend");
+  }
   return parsedUrl.toString();
 }
 
-function isYtdlpSupportedPage(pageUrl) {
-  if (!pageUrl) return false;
-  return /(facebook\.com|fb\.watch|instagram\.com|x\.com|twitter\.com|youtube\.com|youtu\.be)\//i.test(pageUrl);
+function canTryYtdlpPage(pageUrl) {
+  const parsedUrl = safeParseUrl(pageUrl);
+  return Boolean(parsedUrl && /^https?:$/i.test(parsedUrl.protocol)
+    && !/(^|\.)yabancidizi\.news$/i.test(parsedUrl.hostname));
 }
 
 function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourceTitle) {
-  const candidates = getMediaCandidatesForTab(tabId);
+  const candidates = getMediaCandidatesForTab(tabId).filter(
+    (candidate) => candidate.streamKind !== "fragment"
+  );
   if (candidates.length === 0) {
-    if (isYtdlpSupportedPage(sourcePageUrl)) {
+    if (canTryYtdlpPage(sourcePageUrl)) {
       return {
         ok: true,
         capture: {
           url: sourcePageUrl,
           audioUrl: null,
           sourcePageUrl,
-          sourceTitle
+          sourceTitle,
+          forceYtdlp: true,
+          streamManifest: false
         }
       };
     }
     return {
       ok: false,
-      error: "No captured media stream found for this tab yet."
+      error: "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin."
     };
   }
 
@@ -575,17 +830,16 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
       ok: true,
       capture: {
         url: twitterMasterCandidate.url,
+        fallbackUrls: [],
         audioUrl: null,
         sourcePageUrl,
-        sourceTitle
+        sourceTitle,
+        streamManifest: true
       }
     };
   }
 
-  const videoCandidate =
-    selectVideoCandidate(candidates, preferredCandidate) ??
-    preferredCandidate ??
-    candidates[0];
+  const videoCandidate = selectVideoCandidate(candidates, preferredCandidate);
 
   const audioCandidate =
     videoCandidate && videoCandidate.streamKind !== "audio"
@@ -593,38 +847,42 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
       : null;
 
   if (!videoCandidate?.url) {
-    if (isYtdlpSupportedPage(sourcePageUrl)) {
+    if (canTryYtdlpPage(sourcePageUrl)) {
       return {
         ok: true,
         capture: {
           url: sourcePageUrl,
           audioUrl: null,
           sourcePageUrl,
-          sourceTitle
+          sourceTitle,
+          forceYtdlp: true,
+          streamManifest: false
         }
       };
     }
     return {
       ok: false,
-      error: "No captured media stream found for this tab yet."
+      error: "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin."
     };
   }
 
   if (requiresCompanionAudio(videoCandidate) && !audioCandidate?.url) {
-    if (isYtdlpSupportedPage(sourcePageUrl)) {
+    if (canTryYtdlpPage(sourcePageUrl)) {
       return {
         ok: true,
         capture: {
           url: sourcePageUrl,
           audioUrl: null,
           sourcePageUrl,
-          sourceTitle
+          sourceTitle,
+          forceYtdlp: true,
+          streamManifest: false
         }
       };
     }
     return {
       ok: false,
-      error: "X audio stream not captured yet. Play the video with sound for a moment, then try again."
+      error: "The companion audio stream was not captured. Play the video with sound for a moment, then try again."
     };
   }
 
@@ -632,11 +890,43 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
     ok: true,
     capture: {
       url: videoCandidate.url,
+      fallbackUrls: candidates
+        .filter((candidate) =>
+          candidate.url !== videoCandidate.url &&
+          (candidate.streamKind === "playlist" || candidate.streamKind === "master")
+        )
+        .map((candidate) => candidate.url),
       audioUrl: audioCandidate?.url ?? null,
-      sourcePageUrl,
-      sourceTitle
+      sourcePageUrl: videoCandidate.referrerUrl ?? sourcePageUrl,
+      sourceTitle,
+      httpHeaders: buildMediaRequestHeaders(
+        videoCandidate.httpHeaders ?? {},
+        videoCandidate.referrerUrl ?? sourcePageUrl
+      ),
+      streamManifest: videoCandidate.streamKind === "playlist" || videoCandidate.streamKind === "master"
     }
   };
+}
+
+function buildMediaRequestHeaders(capturedHeaders, referrerUrl) {
+  const headers = { ...(capturedHeaders ?? {}) };
+  const normalizedReferrer = normalizePageUrl(referrerUrl);
+  if (normalizedReferrer && !headers.referer) {
+    headers.referer = normalizedReferrer;
+  }
+  if (normalizedReferrer && !headers.origin) {
+    const parsedReferrer = safeParseUrl(normalizedReferrer);
+    if (parsedReferrer) {
+      headers.origin = parsedReferrer.origin;
+    }
+  }
+  if (!headers["user-agent"] && self.navigator?.userAgent) {
+    headers["user-agent"] = self.navigator.userAgent;
+  }
+  if (!headers.accept) {
+    headers.accept = "*/*";
+  }
+  return headers;
 }
 
 function selectVideoCandidate(candidates, preferredCandidate) {
@@ -645,7 +935,10 @@ function selectVideoCandidate(candidates, preferredCandidate) {
     return twitterMasterCandidate;
   }
 
-  if (preferredCandidate && preferredCandidate.streamKind !== "audio") {
+  if (
+    preferredCandidate &&
+    ["video", "muxed", "playlist", "master"].includes(preferredCandidate.streamKind)
+  ) {
     return preferredCandidate;
   }
 
@@ -653,7 +946,7 @@ function selectVideoCandidate(candidates, preferredCandidate) {
     candidate.streamKind === "video" ||
     candidate.streamKind === "muxed" ||
     candidate.streamKind === "playlist" ||
-    candidate.streamKind === "unknown"
+    candidate.streamKind === "master"
   ) ?? null;
 }
 
@@ -684,6 +977,7 @@ function selectAudioCompanionCandidate(candidates, videoCandidate) {
 }
 
 function classifyMediaCandidate(url, type) {
+  if (type === "observed-manifest") return "playlist";
   const parsedUrl = safeParseUrl(url);
   if (!parsedUrl) {
     return "unknown";
@@ -703,6 +997,15 @@ function classifyMediaCandidate(url, type) {
   }
 
   const extension = parsedUrl.pathname.toLowerCase().split(".").pop();
+  if (/\/video\/embed\//i.test(parsedUrl.pathname)) {
+    return "page";
+  }
+  if (IMAGE_EXTENSIONS.has(extension)) {
+    return "fragment";
+  }
+  if (isDisguisedHlsManifest(parsedUrl)) {
+    return "playlist";
+  }
   if (["mp3", "m4a", "aac", "ogg", "wav"].includes(extension)) {
     return "audio";
   }
@@ -711,6 +1014,9 @@ function classifyMediaCandidate(url, type) {
   }
   if (["m3u8", "mpd"].includes(extension)) {
     return "playlist";
+  }
+  if (["m4s", "ts"].includes(extension)) {
+    return "fragment";
   }
   if (type === "audio") {
     return "audio";

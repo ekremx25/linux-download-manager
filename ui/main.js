@@ -2,6 +2,7 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 let currentMetadata = null;
+const liveDownloadStats = new Map();
 
 document.addEventListener("DOMContentLoaded", async () => {
     setupEventListeners();
@@ -167,12 +168,19 @@ function renderDownloads(downloads) {
 }
 
 function renderDownloadItem(dl) {
+    const liveStats = liveDownloadStats.get(dl.id);
     const progress = dl.totalBytes
         ? Math.min(100, (dl.downloadedBytes / dl.totalBytes) * 100).toFixed(1)
         : 0;
-    const sizeText = dl.totalBytes
+    let sizeText = dl.totalBytes
         ? `${formatBytes(dl.downloadedBytes)} / ${formatBytes(dl.totalBytes)}`
         : formatBytes(dl.downloadedBytes);
+    if (liveStats?.speedBytesPerSecond) {
+        sizeText += ` | ${formatSpeed(liveStats.speedBytesPerSecond)}`;
+    }
+    const progressText = dl.totalBytes
+        ? `${progress}%`
+        : dl.status === "in_progress" ? "Canlı" : "—";
 
     let actions = "";
     if (dl.status === "in_progress" || dl.status === "queued") {
@@ -208,7 +216,7 @@ function renderDownloadItem(dl) {
             </div>
             <div class="download-item-details">
                 <span>${sizeText}</span>
-                <span>${progress}%</span>
+                <span>${progressText}</span>
             </div>
             ${checksumHtml}
             ${errorHtml}
@@ -233,6 +241,14 @@ function attachDownloadActions() {
 }
 
 function updateDownloadItem(event) {
+    if (event.status === "in_progress") {
+        liveDownloadStats.set(event.id, {
+            speedBytesPerSecond: event.speedBytesPerSecond || 0,
+        });
+    } else {
+        liveDownloadStats.delete(event.id);
+    }
+
     const item = document.querySelector(`[data-download-id="${event.id}"]`);
     if (!item) {
         loadDownloads();
@@ -243,26 +259,27 @@ function updateDownloadItem(event) {
     statusEl.textContent = event.status;
     statusEl.className = `download-item-status status-${event.status}`;
 
-    if (event.totalBytes) {
-        const progress = Math.min(100, (event.downloadedBytes / event.totalBytes) * 100).toFixed(1);
-        const fill = item.querySelector(".progress-fill");
-        if (fill) fill.style.width = `${progress}%`;
+    const progress = event.totalBytes
+        ? Math.min(100, (event.downloadedBytes / event.totalBytes) * 100).toFixed(1)
+        : 0;
+    const fill = item.querySelector(".progress-fill");
+    if (fill) fill.style.width = `${progress}%`;
 
-        const details = item.querySelector(".download-item-details");
-        if (details) {
-            let speedText = "";
-            if (event.speedBytesPerSecond) {
-                speedText = ` | ${formatBytes(event.speedBytesPerSecond)}/s`;
-            }
-            let etaText = "";
-            if (event.etaSeconds) {
-                etaText = ` | ETA: ${formatTime(event.etaSeconds)}`;
-            }
-            details.innerHTML = `
-                <span>${formatBytes(event.downloadedBytes)} / ${formatBytes(event.totalBytes)}${speedText}${etaText}</span>
-                <span>${progress}%</span>
-            `;
+    const details = item.querySelector(".download-item-details");
+    if (details) {
+        let sizeText = event.totalBytes
+            ? `${formatBytes(event.downloadedBytes)} / ${formatBytes(event.totalBytes)}`
+            : formatBytes(event.downloadedBytes);
+        if (event.speedBytesPerSecond) {
+            sizeText += ` | ${formatSpeed(event.speedBytesPerSecond)}`;
         }
+        if (event.etaSeconds) {
+            sizeText += ` | Kalan: ${formatTime(event.etaSeconds)}`;
+        }
+        details.innerHTML = `
+            <span>${sizeText}</span>
+            <span>${event.totalBytes ? `${progress}%` : "Canlı"}</span>
+        `;
     }
 
     if (event.status === "completed" || event.status === "failed" || event.status === "cancelled") {
@@ -286,6 +303,11 @@ function formatBytes(bytes) {
     const units = ["B", "KB", "MB", "GB", "TB"];
     const i = Math.floor(Math.log(bytes) / Math.log(1024));
     return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + " " + units[i];
+}
+
+function formatSpeed(bytesPerSecond) {
+    const megabitsPerSecond = (bytesPerSecond * 8) / 1000000;
+    return `${formatBytes(bytesPerSecond)}/sn (${megabitsPerSecond.toFixed(1)} Mbit/sn)`;
 }
 
 function formatTime(seconds) {

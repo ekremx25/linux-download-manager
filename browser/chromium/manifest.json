@@ -1,20 +1,47 @@
 {
   "manifest_version": 3,
   "name": "Linux Download Manager Bridge",
-  "version": "0.1.0",
+  "version": "0.1.24",
   "description": "Sends links from Chromium-based browsers to Linux Download Manager.",
-  "permissions": ["contextMenus", "downloads", "nativeMessaging", "storage", "webRequest"],
-  "host_permissions": ["<all_urls>"],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwpHvkTQ2J23CrvIxAXIZcCT+dv61MMIta3RiVDzp4k0n1ZGaRQLDvvff9V4hU580GXSwGMR4XgCXGZj2LXcxNrndBFTJCqoGDcYQuDAQJiR0y7Eg6eoc0hjjvUaAiMd4Aq8xWSz4LqoYSVmTPdLRgRRtPxD4yVxr6bRqXAb906oohYaNki9NBqb690BoV+BsLY3WgxgU5ZFLwqQrRVXRLXkRDQgv+Y0bUczZebHfNskn9AIPHvnWpBvzp/TuOpRkvesRPyNHWpE1D4Dy/yftE/0y+tSxfecwDBBIi2DV31sl9gLXpHKajU0MdHM+5BYCG7JCAeiQ4VOPpqYgR6leaQIDAQAB",
+  "permissions": [
+    "contextMenus",
+    "cookies",
+    "downloads",
+    "nativeMessaging",
+    "storage",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "background": {
     "service_worker": "service-worker.js"
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content-script.js"],
-      "css": ["content-style.css"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content-script.js"
+      ],
+      "css": [
+        "content-style.css"
+      ],
       "run_at": "document_idle",
       "all_frames": true
+    },
+    {
+      "matches": [
+        "https://*.molystream.org/*"
+      ],
+      "js": [
+        "player-manifest-observer.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
     }
   ],
   "action": {

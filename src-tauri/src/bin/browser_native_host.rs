@@ -3,6 +3,7 @@ use linux_download_manager::{
     stage_browser_request,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,14 +14,22 @@ const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 #[serde(rename_all = "camelCase")]
 struct NativeHostInput {
     url: String,
+    #[serde(default)]
+    fallback_urls: Vec<String>,
     audio_url: Option<String>,
     save_dir: Option<String>,
     expected_checksum: Option<String>,
     scheduled_at: Option<String>,
     bandwidth_limit_kbps: Option<u64>,
     source_page_url: Option<String>,
+    #[serde(default)]
+    http_headers: HashMap<String, String>,
     source_title: Option<String>,
     format: Option<String>,
+    #[serde(default)]
+    force_ytdlp: bool,
+    #[serde(default)]
+    stream_manifest: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,14 +57,18 @@ fn run() -> Result<(), String> {
     while let Some(input) = read_message::<NativeHostInput>()? {
         let request: BrowserDownloadRequest = new_browser_download_request(
             input.url,
+            input.fallback_urls,
             input.audio_url,
             input.save_dir,
             input.expected_checksum,
             input.scheduled_at,
             input.bandwidth_limit_kbps,
             input.source_page_url,
+            input.http_headers,
             input.source_title,
             input.format,
+            input.force_ytdlp,
+            input.stream_manifest,
         );
 
         let app_data_dir = resolve_app_data_dir()?;

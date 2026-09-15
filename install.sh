@@ -25,6 +25,7 @@ die()    { echo -e "${BOLD}${RED}✗${RESET}  $*" >&2; exit 1; }
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 BIN_DIR="${HOME}/.local/bin"
+export PATH="${HOME}/.cargo/bin:${BIN_DIR}:${PATH}"
 APP_DATA_DIR="${HOME}/.local/share/linux-download-manager"
 DESKTOP_DIR="${HOME}/.local/share/applications"
 ICON_DIR="${HOME}/.local/share/icons/hicolor/256x256/apps"
@@ -32,6 +33,7 @@ EXT_DIR="${HOME}/Documents/Linux Download Manager Extension"
 
 NATIVE_HOST_NAME="com.eko.linuxdownloadmanager"
 NATIVE_HOST_BIN="${APP_DATA_DIR}/bin/browser_native_host"
+EXTENSION_ID="dhbkcopeagecbkoncdjefnjlcienhlpg"
 
 # ── Detect mode: local repo or remote curl|bash ──────────────────────────────
 # If this file lives inside a git/source checkout, reuse it. Otherwise clone
@@ -58,22 +60,27 @@ ensure_cargo() {
   if command -v cargo >/dev/null 2>&1; then
     return 0
   fi
-  warn "cargo not found. Install rust first:"
+  warn "cargo not found; installing Rust build tools"
   if command -v pacman >/dev/null 2>&1; then
-    info "  sudo pacman -S rust     # Arch/Manjaro"
+    sudo pacman -S --needed --noconfirm rust || die "Could not install Rust with pacman."
   elif command -v apt >/dev/null 2>&1; then
-    info "  sudo apt install cargo  # Debian/Ubuntu"
+    sudo apt install -y rustc cargo || die "Could not install Rust with apt."
   elif command -v dnf >/dev/null 2>&1; then
-    info "  sudo dnf install rust cargo  # Fedora"
+    sudo dnf install -y rust cargo || die "Could not install Rust with dnf."
   else
     info "  https://rustup.rs (any distro)"
+    die "Install rust/cargo and re-run this script."
   fi
-  die "Install rust/cargo and re-run this script."
+  command -v cargo >/dev/null 2>&1 || die "cargo is still unavailable after installation."
 }
 
 # ── Prerequisite: system libs (webkit2gtk-4.1 etc.) ─────────────────────────
 ensure_system_libs() {
   local missing=()
+  if ! command -v pkg-config >/dev/null 2>&1; then
+    missing+=("pkg-config")
+  fi
+  pkg-config --exists glib-2.0        2>/dev/null || missing+=("glib2")
   pkg-config --exists webkit2gtk-4.1 2>/dev/null || missing+=("webkit2gtk-4.1")
   pkg-config --exists gtk+-3.0         2>/dev/null || missing+=("gtk3")
   pkg-config --exists javascriptcoregtk-4.1 2>/dev/null || missing+=("javascriptcoregtk-4.1")
@@ -85,19 +92,27 @@ ensure_system_libs() {
 
   warn "Missing system libraries: ${missing[*]}"
   if command -v pacman >/dev/null 2>&1; then
-    info "  sudo pacman -S webkit2gtk-4.1 gtk3 libsoup3 pkgconf"
+    sudo pacman -S --needed --noconfirm glib2 webkit2gtk-4.1 gtk3 libsoup3 pkgconf \
+      || die "Could not install Arch/CachyOS build libraries."
   elif command -v apt >/dev/null 2>&1; then
-    info "  sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev pkg-config"
+    sudo apt install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev pkg-config \
+      || die "Could not install Debian/Ubuntu build libraries."
   elif command -v dnf >/dev/null 2>&1; then
-    info "  sudo dnf install webkit2gtk4.1-devel gtk3-devel libsoup3-devel pkgconf"
+    sudo dnf install -y glib2-devel webkit2gtk4.1-devel gtk3-devel libsoup3-devel pkgconf-pkg-config \
+      || die "Could not install Fedora build libraries."
+  else
+    die "Install glib2, GTK3, WebKitGTK 4.1, libsoup3 and pkg-config before building."
   fi
-  die "Install the libraries above and re-run this script."
+  command -v pkg-config >/dev/null 2>&1 || die "pkg-config is still unavailable."
+  for library in glib-2.0 webkit2gtk-4.1 gtk+-3.0 javascriptcoregtk-4.1 libsoup-3.0; do
+    pkg-config --exists "${library}" || die "${library} is still unavailable after package installation."
+  done
 }
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 build_binary() {
   log "Building release binary (this takes 1–2 minutes on first run)…"
-  PATH="${HOME}/.cargo/bin:${PATH}" cargo build --release --manifest-path src-tauri/Cargo.toml >/dev/null \
+  cargo build --release --locked --manifest-path src-tauri/Cargo.toml >/dev/null \
     || die "cargo build failed. Re-run with: cargo build --release --manifest-path src-tauri/Cargo.toml"
 }
 
@@ -114,6 +129,7 @@ install_extension() {
   mkdir -p "${EXT_DIR}"
   cp browser/chromium/manifest.json     "${EXT_DIR}/"
   cp browser/chromium/service-worker.js "${EXT_DIR}/"
+  cp browser/chromium/player-manifest-observer.js "${EXT_DIR}/"
   cp browser/chromium/content-script.js "${EXT_DIR}/"
   cp browser/chromium/content-style.css "${EXT_DIR}/"
 }
@@ -149,24 +165,28 @@ install_ytdlp_and_deps() {
   local ytdlp_path="${BIN_DIR}/yt-dlp"
   if ! command -v yt-dlp >/dev/null 2>&1 && [[ ! -x "${ytdlp_path}" ]]; then
     info "    fetching yt-dlp release…"
-    if ! curl -fL --progress-bar \
+    if curl -fL --progress-bar \
         -o "${ytdlp_path}" \
         "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"; then
+      chmod +x "${ytdlp_path}"
+      info "    yt-dlp → ${ytdlp_path} ($(${ytdlp_path} --version 2>/dev/null || echo "??"))"
+    else
       warn "yt-dlp download failed. YouTube/social media downloads will be disabled."
-      return 0
     fi
-    chmod +x "${ytdlp_path}"
-    info "    yt-dlp → ${ytdlp_path} ($(${ytdlp_path} --version 2>/dev/null || echo "??"))"
   else
     info "    yt-dlp already on PATH — skipping"
   fi
 
   # ffmpeg is needed for video+audio stream muxing on YouTube.
   if ! command -v ffmpeg >/dev/null 2>&1; then
-    warn "ffmpeg not found. YouTube HD downloads need it to merge audio + video."
-    if   command -v pacman >/dev/null 2>&1; then info "    sudo pacman -S ffmpeg"
-    elif command -v apt    >/dev/null 2>&1; then info "    sudo apt install ffmpeg"
-    elif command -v dnf    >/dev/null 2>&1; then info "    sudo dnf install ffmpeg"
+    warn "ffmpeg not found; installing media support"
+    if command -v pacman >/dev/null 2>&1; then
+      sudo pacman -S --needed --noconfirm ffmpeg || warn "ffmpeg installation failed."
+    elif command -v apt >/dev/null 2>&1; then
+      sudo apt install -y ffmpeg || warn "ffmpeg installation failed."
+    elif command -v dnf >/dev/null 2>&1; then
+      sudo dnf install -y ffmpeg || sudo dnf install -y ffmpeg-free \
+        || warn "ffmpeg installation failed."
     fi
   fi
 
@@ -178,13 +198,20 @@ install_ytdlp_and_deps() {
   elif command -v node >/dev/null 2>&1; then
     js_runtime="node"
   else
-    warn "No JavaScript runtime (deno / node) found — YouTube downloads will be degraded."
-    if   command -v pacman >/dev/null 2>&1; then info "    sudo pacman -S nodejs      # or: yay -S deno-bin"
-    elif command -v apt    >/dev/null 2>&1; then info "    sudo apt install nodejs"
-    elif command -v dnf    >/dev/null 2>&1; then info "    sudo dnf install nodejs"
+    warn "No JavaScript runtime found; installing Node.js for yt-dlp"
+    if command -v pacman >/dev/null 2>&1; then
+      sudo pacman -S --needed --noconfirm nodejs || warn "Node.js installation failed."
+    elif command -v apt >/dev/null 2>&1; then
+      sudo apt install -y nodejs || warn "Node.js installation failed."
+    elif command -v dnf >/dev/null 2>&1; then
+      sudo dnf install -y nodejs || warn "Node.js installation failed."
     fi
-    info "    Once installed, re-run this script — it'll wire the runtime into yt-dlp's config."
-    return 0
+    if command -v node >/dev/null 2>&1; then
+      js_runtime="node"
+    else
+      warn "YouTube downloads may be degraded until Node.js or Deno is installed."
+      return 0
+    fi
   fi
 
   # Persistent yt-dlp config so every invocation (including the one from the
@@ -210,6 +237,7 @@ install_native_host() {
     "${HOME}/.config/google-chrome/NativeMessagingHosts"
     "${HOME}/.config/chromium/NativeMessagingHosts"
     "${HOME}/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts"
+    "${HOME}/.config/microsoft-edge-dev/NativeMessagingHosts"
     "${HOME}/.config/microsoft-edge/NativeMessagingHosts"
     "${HOME}/.config/vivaldi/NativeMessagingHosts"
   )
@@ -221,7 +249,7 @@ install_native_host() {
   "description": "Native messaging bridge for Linux Download Manager",
   "path": "${NATIVE_HOST_BIN}",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://unknown/"]
+  "allowed_origins": ["chrome-extension://${EXTENSION_ID}/"]
 }
 EOF
 )
@@ -251,9 +279,7 @@ final_instructions() {
   echo "     2. Toggle ${BOLD}Developer mode${RESET} (top right)"
   echo "     3. Click ${BOLD}Load unpacked${RESET}"
   echo "     4. Select: ${BOLD}${EXT_DIR}${RESET}"
-  echo "     5. Copy the extension ID shown under the extension name"
-  echo "     6. Replace 'unknown' with that ID in the JSON files under"
-  echo "        ${DIM}~/.config/<browser>/NativeMessagingHosts/${NATIVE_HOST_NAME}.json${RESET}"
+  echo "     5. Reload the extension after updating its files"
   echo
   echo "  Uninstall: ${BOLD}./uninstall.sh${RESET}"
   echo

@@ -1,3 +1,7 @@
+.ldm-hover-button[hidden] {
+  display: none !important;
+}
+
 .ldm-hover-button {
   position: absolute;
   z-index: 2147483647;
@@ -31,17 +35,23 @@
 }
 
 .ldm-media-button {
-  position: fixed;
-  border: 0;
-  border-radius: 999px;
-  padding: 10px 14px;
-  font: 700 12px/1 "IBM Plex Sans", "Segoe UI", sans-serif;
-  letter-spacing: 0.04em;
-  color: #04110d;
-  background: linear-gradient(135deg, #3dd29f, #86e8ff);
-  box-shadow: 0 18px 34px rgba(3, 15, 14, 0.3);
-  cursor: pointer;
-  pointer-events: auto;
+  position: fixed !important;
+  display: block !important;
+  width: auto !important;
+  height: auto !important;
+  min-width: 0 !important;
+  border: 0 !important;
+  border-radius: 999px !important;
+  padding: 10px 16px !important;
+  font: 700 13px/1 "IBM Plex Sans", "Segoe UI", sans-serif !important;
+  letter-spacing: 0.04em !important;
+  color: #04110d !important;
+  background: linear-gradient(135deg, #3dd29f, #86e8ff) !important;
+  box-shadow: 0 18px 34px rgba(3, 15, 14, 0.45) !important;
+  opacity: 1 !important;
+  visibility: visible !important;
+  cursor: pointer !important;
+  pointer-events: auto !important;
 }
 
 .ldm-media-button-floating {

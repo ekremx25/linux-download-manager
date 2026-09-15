@@ -3,19 +3,28 @@ use crate::download::DownloadRecord;
 use crate::storage::NewDownloadRecord;
 use chrono::{Local, LocalResult, NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadJobRequest {
     pub url: String,
+    #[serde(default)]
+    pub fallback_urls: Vec<String>,
     pub audio_url: Option<String>,
     pub source_page_url: Option<String>,
+    #[serde(default)]
+    pub http_headers: HashMap<String, String>,
     pub save_dir: Option<String>,
     pub expected_checksum: Option<String>,
     pub scheduled_at: Option<String>,
     pub bandwidth_limit_kbps: Option<u64>,
     pub format: Option<String>,
     pub source_title: Option<String>,
+    #[serde(default)]
+    pub force_ytdlp: bool,
+    #[serde(default)]
+    pub stream_manifest: bool,
 }
 
 pub async fn queue_download_request(
@@ -23,7 +32,17 @@ pub async fn queue_download_request(
     state: &AppState,
     request: DownloadJobRequest,
 ) -> Result<DownloadRecord, String> {
-    let metadata = state.download_service.inspect_url(&request.url).await?;
+    let metadata = if request.force_ytdlp || request.stream_manifest {
+        crate::download::DownloadMetadata {
+            source_url: request.url.clone(),
+            suggested_file_name: "video.mp4".to_string(),
+            content_length: None,
+            content_type: Some("video/mp4".to_string()),
+            resumable: false,
+        }
+    } else {
+        state.download_service.inspect_url(&request.url).await?
+    };
     let target_dir = state.resolve_target_dir(request.save_dir.as_deref())?;
     let expected_checksum = normalize_checksum(request.expected_checksum)?;
     let scheduled_at = normalize_schedule_input(request.scheduled_at)?;
@@ -34,18 +53,19 @@ pub async fn queue_download_request(
     )?;
     let file_name = match request.source_title.as_deref() {
         Some(title) if !title.is_empty() && title.len() > 3 => {
-            let clean: String = title
-                .chars()
-                .map(|c| if "/\\:*?\"<>|".contains(c) { '_' } else { c })
-                .collect();
+            let clean = sanitize_file_name(title, "video");
             let ext = if metadata.suggested_file_name.contains('.') {
                 metadata.suggested_file_name.rsplit('.').next().unwrap_or("mp4")
             } else {
                 "mp4"
             };
-            format!("{clean}.{ext}")
+            if clean.to_ascii_lowercase().ends_with(&format!(".{}", ext.to_ascii_lowercase())) {
+                clean
+            } else {
+                format!("{clean}.{ext}")
+            }
         }
-        _ => metadata.suggested_file_name.clone(),
+        _ => sanitize_file_name(&metadata.suggested_file_name, "download.bin"),
     };
     let target_path = state
         .download_service
@@ -88,9 +108,13 @@ pub async fn queue_download_request(
         QueuedDownload {
             id: created.id,
             url: request.url,
+            fallback_urls: request.fallback_urls,
             audio_url: request.audio_url,
             source_page_url: request.source_page_url,
+            http_headers: request.http_headers,
             format: request.format,
+            force_ytdlp: request.force_ytdlp,
+            stream_manifest: request.stream_manifest,
             target_path,
             resumable_hint: metadata.resumable,
             total_bytes_hint: metadata.content_length,
@@ -101,6 +125,26 @@ pub async fn queue_download_request(
     )?;
 
     state.storage.get_download(created.id)
+}
+
+fn sanitize_file_name(value: &str, fallback: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .map(|character| {
+            if character.is_control() || "/\\:*?\"<>|".contains(character) {
+                '_'
+            } else {
+                character
+            }
+        })
+        .take(180)
+        .collect();
+    let cleaned = cleaned.trim().trim_matches('.').trim();
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        fallback.to_string()
+    } else {
+        cleaned.to_string()
+    }
 }
 
 pub fn normalize_checksum(value: Option<String>) -> Result<Option<String>, String> {

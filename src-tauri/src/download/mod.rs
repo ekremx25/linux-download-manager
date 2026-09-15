@@ -7,8 +7,10 @@ use reqwest::header::{
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStderr, Command, ExitStatus, Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs;
@@ -19,12 +21,44 @@ use tokio::sync::mpsc;
 
 const SEGMENT_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SEGMENTS: usize = 4;
-const HLS_CONTENT_TYPES: &[&str] = &[
+const STREAM_MANIFEST_CONTENT_TYPES: &[&str] = &[
     "application/vnd.apple.mpegurl",
     "application/x-mpegurl",
     "audio/mpegurl",
     "audio/x-mpegurl",
+    "application/dash+xml",
 ];
+
+struct KillOnDropChild {
+    child: Option<Child>,
+}
+
+impl KillOnDropChild {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.child.as_mut().unwrap().try_wait()
+    }
+
+    fn take_stderr(&mut self) -> Option<ChildStderr> {
+        self.child.as_mut().and_then(|child| child.stderr.take())
+    }
+
+    fn wait_with_output(mut self) -> std::io::Result<Output> {
+        self.child.take().unwrap().wait_with_output()
+    }
+}
+
+impl Drop for KillOnDropChild {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,12 +159,12 @@ impl DownloadService {
             });
         }
 
-        if looks_like_hls_url(&url) {
+        if looks_like_stream_manifest_url(&url) {
             return Ok(DownloadMetadata {
                 source_url: url.as_str().to_string(),
-                suggested_file_name: derive_hls_file_name(&url),
+                suggested_file_name: derive_stream_file_name(&url),
                 content_length: None,
-                content_type: Some("application/vnd.apple.mpegurl".to_string()),
+                content_type: Some("application/stream-manifest".to_string()),
                 resumable: false,
             });
         }
@@ -158,14 +192,14 @@ impl DownloadService {
             .headers()
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
-            .map(is_hls_content_type)
+            .map(is_stream_manifest_content_type)
             .unwrap_or(false)
         {
             return Ok(DownloadMetadata {
                 source_url: url.as_str().to_string(),
-                suggested_file_name: derive_hls_file_name(&url),
+                suggested_file_name: derive_stream_file_name(&url),
                 content_length: None,
-                content_type: Some("application/vnd.apple.mpegurl".to_string()),
+                content_type: Some("application/stream-manifest".to_string()),
                 resumable: false,
             });
         }
@@ -252,7 +286,11 @@ impl DownloadService {
         total_bytes_hint: Option<u64>,
         bandwidth_limit_kbps: Option<u64>,
         source_page_url: Option<&str>,
+        http_headers: &HashMap<String, String>,
         format: Option<&str>,
+        force_ytdlp: bool,
+        stream_manifest: bool,
+        fallback_urls: &[String],
         mut on_started: impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
         mut on_progress: impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
     ) -> Result<(u64, Option<u64>, usize), String> {
@@ -265,9 +303,22 @@ impl DownloadService {
                 .map_err(|error| format!("failed to create target directory: {error}"))?;
         }
 
+        if force_ytdlp {
+            return self
+                .download_with_ytdlp(
+                    &url,
+                    target_path,
+                    format,
+                    false,
+                    &mut on_started,
+                    &mut on_progress,
+                )
+                .await;
+        }
+
         if let Some(ytdlp_url) = resolve_ytdlp_source(&url, source_page_url) {
             if let Ok(result) = self
-                .download_with_ytdlp(&ytdlp_url, target_path, format, &mut on_started, &mut on_progress)
+                .download_with_ytdlp(&ytdlp_url, target_path, format, false, &mut on_started, &mut on_progress)
                 .await
             {
                 return Ok(result);
@@ -278,16 +329,33 @@ impl DownloadService {
                 .and_then(|u| validate_url(u).ok())
                 .unwrap_or_else(|| url.clone());
             if let Ok(result) = self
-                .download_with_ytdlp(&fallback_url, target_path, format, &mut on_started, &mut on_progress)
+                .download_with_ytdlp(&fallback_url, target_path, format, false, &mut on_started, &mut on_progress)
                 .await
             {
                 return Ok(result);
             }
         }
 
-        if looks_like_hls_url(&url) {
+        if stream_manifest || looks_like_stream_manifest_url(&url) {
+            let mut playlist_urls = vec![url.clone()];
+            for candidate in fallback_urls {
+                if let Ok(candidate_url) = validate_url(candidate) {
+                    if looks_like_stream_manifest_url(&candidate_url)
+                        && !playlist_urls.iter().any(|known| known == &candidate_url)
+                    {
+                        playlist_urls.push(candidate_url);
+                    }
+                }
+            }
             return self
-                .download_hls_to_path(&url, target_path, &mut on_started, &mut on_progress)
+                .download_stream_manifest_to_path(
+                    &playlist_urls,
+                    source_page_url,
+                    http_headers,
+                    target_path,
+                    &mut on_started,
+                    &mut on_progress,
+                )
                 .await;
         }
 
@@ -386,9 +454,11 @@ impl DownloadService {
         Ok((downloaded_bytes, total_bytes.or(total_bytes_hint), 1))
     }
 
-    async fn download_hls_to_path(
+    async fn download_stream_manifest_to_path(
         &self,
-        playlist_url: &Url,
+        playlist_urls: &[Url],
+        source_page_url: Option<&str>,
+        http_headers: &HashMap<String, String>,
         target_path: &Path,
         on_started: &mut impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
         on_progress: &mut impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
@@ -408,68 +478,169 @@ impl DownloadService {
 
         on_started(0, None, 1)?;
 
-        let mut child = Command::new("ffmpeg")
-            .arg("-y")
-            .arg("-nostdin")
-            .arg("-loglevel")
-            .arg("error")
-            .arg("-i")
-            .arg(playlist_url.as_str())
-            .arg("-map")
-            .arg("0:v?")
-            .arg("-map")
-            .arg("0:a?")
-            .arg("-c")
-            .arg("copy")
-            .arg("-movflags")
-            .arg("+faststart")
-            .arg("-f")
-            .arg("mp4")
-            .arg(&temp_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("failed to start ffmpeg for HLS download: {error}"))?;
+        let referer = http_headers
+            .get("referer")
+            .and_then(|value| validate_url(value).ok())
+            .or_else(|| source_page_url.and_then(|value| validate_url(value).ok()));
+        let user_agent = http_headers
+            .get("user-agent")
+            .map(String::as_str)
+            .unwrap_or("Mozilla/5.0");
+        let forwarded_headers = [
+            "origin",
+            "cookie",
+            "accept",
+            "accept-language",
+            "sec-ch-ua",
+            "sec-ch-ua-mobile",
+            "sec-ch-ua-platform",
+            "sec-fetch-dest",
+            "sec-fetch-mode",
+            "sec-fetch-site",
+        ]
+            .iter()
+            .filter_map(|name| {
+                http_headers
+                    .get(*name)
+                    .map(|value| format!("{name}: {value}\r\n"))
+            })
+            .collect::<String>();
+        let mut last_error = None;
 
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    if !status.success() {
-                        let output = child.wait_with_output().map_err(|error| {
-                            format!("failed to collect ffmpeg error output: {error}")
-                        })?;
-                        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                        let message = if stderr.is_empty() {
-                            "ffmpeg could not finalize the HLS stream".to_string()
+        // Some HLS providers publish the playlist a moment after playback starts.
+        // A short retry turns their transient 404 into a normal download.
+        'playlists: for playlist_url in playlist_urls {
+            for attempt in 0..4 {
+            if attempt > 0 {
+                let _ = fs::remove_file(&temp_path).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+
+            let mut command = Command::new("ffmpeg");
+            command
+                .arg("-y")
+                .arg("-nostdin")
+                .arg("-loglevel")
+                .arg("error")
+                .arg("-user_agent")
+                .arg(user_agent)
+                .arg("-reconnect")
+                .arg("1")
+                .arg("-reconnect_streamed")
+                .arg("1")
+                .arg("-reconnect_delay_max")
+                .arg("5");
+            if let Some(referer) = referer.as_ref() {
+                command.arg("-referer").arg(referer.as_str());
+            }
+            if !forwarded_headers.is_empty() {
+                command.arg("-headers").arg(&forwarded_headers);
+            }
+            // DASH does not accept the HLS demuxer's segment options.
+            if !playlist_url.path().to_ascii_lowercase().ends_with(".mpd") {
+                command
+                    // Captured HLS playlists can have extensionless URLs and
+                    // text/html MIME types, which FFmpeg's probe rejects.
+                    .arg("-f").arg("hls")
+                    .arg("-allowed_segment_extensions").arg("ALL")
+                    .arg("-extension_picky").arg("0")
+                    .arg("-seg_max_retry").arg("5");
+            }
+            let mut child = KillOnDropChild::new(command
+                .arg("-allowed_extensions")
+                .arg("ALL")
+                .arg("-rw_timeout")
+                .arg("15000000")
+                .arg("-i")
+                .arg(playlist_url.as_str())
+                .arg("-map")
+                .arg("0:v?")
+                .arg("-map")
+                .arg("0:a?")
+                .arg("-c")
+                .arg("copy")
+                .arg("-movflags")
+                .arg("+faststart")
+                .arg("-f")
+                .arg("mp4")
+                .arg(&temp_path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|error| format!("failed to start ffmpeg for stream download: {error}"))?);
+
+            // FFmpeg can emit many transient network errors while an HLS stream is
+            // running. Drain stderr concurrently so a full OS pipe cannot block the
+            // downloader indefinitely.
+            let stderr_reader = child.take_stderr().map(|mut stderr| {
+                std::thread::spawn(move || {
+                    let mut bytes = Vec::new();
+                    let _ = stderr.read_to_end(&mut bytes);
+                    bytes
+                })
+            });
+
+            let attempt_error = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        if status.success() {
+                            break None;
+                        }
+                        let stderr = stderr_reader
+                            .and_then(|reader| reader.join().ok())
+                            .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
+                            .unwrap_or_default();
+                        break Some(if stderr.is_empty() {
+                            "ffmpeg could not finalize the media stream".to_string()
                         } else {
                             format!("ffmpeg failed: {stderr}")
-                        };
-                        return Err(message);
+                        });
                     }
-                    break;
+                    Ok(None) => {
+                        let downloaded_bytes = fs::metadata(&temp_path)
+                            .await
+                            .map(|metadata| metadata.len())
+                            .unwrap_or(0);
+                        on_progress(downloaded_bytes, None, 1)?;
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
+                    Err(error) => {
+                        break Some(format!("failed while polling ffmpeg process: {error}"));
+                    }
                 }
-                Ok(None) => {
-                    let downloaded_bytes = fs::metadata(&temp_path)
-                        .await
-                        .map(|metadata| metadata.len())
-                        .unwrap_or(0);
-                    on_progress(downloaded_bytes, None, 1)?;
-                    tokio::time::sleep(Duration::from_millis(300)).await;
-                }
-                Err(error) => {
-                    return Err(format!("failed while polling ffmpeg process: {error}"));
+            };
+
+                match attempt_error {
+                    None => {
+                        last_error = None;
+                        break 'playlists;
+                    }
+                    Some(error) => {
+                        let retryable = error.contains("404 Not Found")
+                            || error.contains("Server returned 5")
+                            || error.contains("Connection timed out")
+                            || error.contains("Connection reset");
+                        last_error = Some(error);
+                        if !retryable {
+                            break;
+                        }
+                    }
                 }
             }
+        }
+
+        if let Some(error) = last_error {
+            return Err(error);
         }
 
         let downloaded_bytes = fs::metadata(&temp_path)
             .await
             .map(|metadata| metadata.len())
-            .map_err(|error| format!("failed to inspect downloaded HLS output: {error}"))?;
+            .map_err(|error| format!("failed to inspect downloaded stream output: {error}"))?;
 
         fs::rename(&temp_path, target_path)
             .await
-            .map_err(|error| format!("failed to finalize downloaded HLS file: {error}"))?;
+            .map_err(|error| format!("failed to finalize downloaded stream file: {error}"))?;
 
         Ok((downloaded_bytes, None, 1))
     }
@@ -499,7 +670,7 @@ impl DownloadService {
 
         on_started(0, None, 2)?;
 
-        let mut child = Command::new("ffmpeg")
+        let mut child = KillOnDropChild::new(Command::new("ffmpeg")
             .arg("-y")
             .arg("-nostdin")
             .arg("-loglevel")
@@ -522,16 +693,24 @@ impl DownloadService {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| format!("failed to start ffmpeg for media merge: {error}"))?;
+            .map_err(|error| format!("failed to start ffmpeg for media merge: {error}"))?);
+
+        let stderr_reader = child.take_stderr().map(|mut stderr| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = stderr.read_to_end(&mut bytes);
+                bytes
+            })
+        });
 
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     if !status.success() {
-                        let output = child.wait_with_output().map_err(|error| {
-                            format!("failed to collect ffmpeg error output: {error}")
-                        })?;
-                        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                        let stderr = stderr_reader
+                            .and_then(|reader| reader.join().ok())
+                            .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
+                            .unwrap_or_default();
                         let message = if stderr.is_empty() {
                             "ffmpeg could not merge the captured media streams".to_string()
                         } else {
@@ -572,20 +751,16 @@ impl DownloadService {
         url: &Url,
         target_path: &Path,
         format: Option<&str>,
+        use_browser_cookies: bool,
         on_started: &mut impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
         on_progress: &mut impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
     ) -> Result<(u64, Option<u64>, usize), String> {
         let ytdlp_path = resolve_ytdlp_path().ok_or("yt-dlp is not available")?;
 
-        let download_dir = target_path
-            .parent()
-            .ok_or("failed to resolve download directory")?;
-        let ytdlp_template = download_dir.join("%(title).100s [%(id)s].%(ext)s");
-
         on_started(0, None, 1)?;
 
         let format_spec = format.unwrap_or("bv*+ba/b");
-        let needs_cookies = url.host_str().map(|h|
+        let needs_cookies = use_browser_cookies || url.host_str().map(|h|
             h.contains("facebook.com") || h.contains("fb.watch") || h.contains("instagram.com")
         ).unwrap_or(false);
         let mut cmd = clean_env_command(&ytdlp_path);
@@ -600,15 +775,15 @@ impl DownloadService {
                 .arg(detect_browser_for_cookies());
         }
         cmd.arg("-o")
-            .arg(&ytdlp_template)
+            .arg(target_path)
             .arg("--print")
             .arg("after_move:filepath")
             .arg(url.as_str())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped());
-        let child = cmd
+        let child = KillOnDropChild::new(cmd
             .spawn()
-            .map_err(|error| format!("failed to start yt-dlp: {error}"))?;
+            .map_err(|error| format!("failed to start yt-dlp: {error}"))?);
 
         let output = child
             .wait_with_output()
@@ -625,8 +800,6 @@ impl DownloadService {
         }
 
         let actual_path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let actual_path = PathBuf::from(&actual_path_str);
-
         if actual_path_str.is_empty() {
             return Err("yt-dlp completed but did not report output file".to_string());
         }
@@ -640,22 +813,21 @@ impl DownloadService {
         let actual_path = PathBuf::from(final_file.trim());
 
         if !actual_path.exists() {
-            return Err(format!("yt-dlp output file not found: {}", actual_path.display()));
+            if !target_path.exists() {
+                return Err(format!("yt-dlp output file not found: {}", actual_path.display()));
+            }
         }
 
-        let downloaded_bytes = fs::metadata(&actual_path)
+        if actual_path.exists() && actual_path != target_path {
+            fs::rename(&actual_path, target_path)
+                .await
+                .map_err(|error| format!("failed to finalize yt-dlp output: {error}"))?;
+        }
+
+        let downloaded_bytes = fs::metadata(target_path)
             .await
             .map(|metadata| metadata.len())
             .map_err(|error| format!("failed to inspect yt-dlp output: {error}"))?;
-
-        // Rename target_path to match actual yt-dlp output name in DB
-        let actual_name = actual_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if target_path.exists() && target_path != actual_path {
-            let _ = fs::remove_file(target_path).await;
-        }
 
         on_progress(downloaded_bytes, Some(downloaded_bytes), 1)?;
         Ok((downloaded_bytes, Some(downloaded_bytes), 1))
@@ -1077,13 +1249,20 @@ fn is_ytdlp_supported_page(page_url: &str) -> bool {
         || dominated_by("youtu.be/")
 }
 
-fn looks_like_hls_url(url: &Url) -> bool {
-    url.path().to_ascii_lowercase().ends_with(".m3u8")
+fn looks_like_stream_manifest_url(url: &Url) -> bool {
+    let path = url.path().to_ascii_lowercase();
+    path.ends_with(".m3u8")
+        || path.ends_with(".m3u")
+        || path.ends_with(".mpd")
+        || (path.contains("/hls/")
+            && (path.ends_with("/master.txt")
+                || path.ends_with("/index.txt")
+                || path.ends_with("/playlist.txt")))
 }
 
-fn is_hls_content_type(value: &str) -> bool {
+fn is_stream_manifest_content_type(value: &str) -> bool {
     let normalized = value.to_ascii_lowercase();
-    HLS_CONTENT_TYPES
+    STREAM_MANIFEST_CONTENT_TYPES
         .iter()
         .any(|candidate| normalized.contains(candidate))
 }
@@ -1129,7 +1308,7 @@ fn derive_file_name(url: &Url, headers: &HeaderMap) -> String {
         })
 }
 
-fn derive_hls_file_name(url: &Url) -> String {
+fn derive_stream_file_name(url: &Url) -> String {
     let base = url
         .path_segments()
         .and_then(|segments| segments.last())
@@ -1139,6 +1318,7 @@ fn derive_hls_file_name(url: &Url) -> String {
             decoded
                 .strip_suffix(".m3u8")
                 .or_else(|| decoded.strip_suffix(".m3u"))
+                .or_else(|| decoded.strip_suffix(".mpd"))
                 .unwrap_or(&decoded)
                 .to_string()
         })

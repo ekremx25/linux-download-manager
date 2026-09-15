@@ -40,14 +40,18 @@ pub async fn start_download(
         &state,
         DownloadJobRequest {
             url,
+            fallback_urls: Vec::new(),
             audio_url: None,
             source_page_url: None,
+            http_headers: Default::default(),
             save_dir,
             expected_checksum,
             scheduled_at,
             bandwidth_limit_kbps,
             format: None,
             source_title: None,
+            force_ytdlp: false,
+            stream_manifest: false,
         },
     )
     .await
@@ -127,9 +131,13 @@ pub async fn resume_download(
         QueuedDownload {
             id,
             url: record.url,
+            fallback_urls: Vec::new(),
             audio_url: None,
             source_page_url: None,
+            http_headers: Default::default(),
             format: None,
+            force_ytdlp: false,
+            stream_manifest: false,
             target_path: std::path::Path::new(&record.save_path).to_path_buf(),
             resumable_hint: metadata.resumable,
             total_bytes_hint: record.total_bytes.or(metadata.content_length),
