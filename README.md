@@ -9,15 +9,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ekremx25/linux-download-manager/releases/latest"><b>⬇ Download AppImage</b></a>
-  &nbsp;·&nbsp;
-  <a href="#install">Install from source</a>
+  <a href="#installation"><b>Install from source</b></a>
   &nbsp;·&nbsp;
   <a href="#troubleshooting">Troubleshooting</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/ekremx25/linux-download-manager/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ekremx25/linux-download-manager?label=release&color=17A090"></a>
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Platform: Linux" src="https://img.shields.io/badge/platform-Linux-1f6feb.svg">
   <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-orange.svg">
@@ -26,7 +23,7 @@
 <details>
 <summary>Türkçe açıklama</summary>
 
-**Linux için IDM tarzı indirme yöneticisi.** Rust + Tauri ile yazıldı, Chromium tarayıcı eklentisi üzerinden çalışır. YouTube, Twitter, Reddit, TikTok video indirme desteği `yt-dlp` ile. Arch, Ubuntu, Fedora üzerinde AppImage olarak çalışır. Açık kaynak, ücretsiz, **IDM alternatifi**.
+**Linux için IDM tarzı indirme yöneticisi.** Rust + Tauri ile yazıldı, Chromium tarayıcı eklentisi üzerinden çalışır. YouTube, Twitter, Reddit, TikTok video indirme desteği `yt-dlp` ile. Arch, CachyOS, Ubuntu ve Fedora üzerinde kaynak koddan kurulabilir. Açık kaynak, ücretsiz, **IDM alternatifi**.
 
 Tek komutla kurulum:
 ```bash
@@ -41,7 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/ekremx25/linux-download-manager/mai
 
 A lightweight, fast download manager for **Linux** — think **IDM (Internet Download Manager) alternative** for Arch, Ubuntu, Fedora. Integrates directly into Chromium-based browsers (Chrome, Brave, Edge, Vivaldi) through a native messaging bridge and an extension, and lets you download videos from YouTube, Twitter/X, Reddit, TikTok and ~1000 more sites through `yt-dlp` with a single click.
 
-**Why this exists:** Linux never got an official IDM port, and most download-manager alternatives are either abandoned, require Wine, or don't integrate with the browser. This one does — a small Rust binary + a Chromium extension + a Tauri GUI, distributed as a single AppImage.
+**Why this exists:** Linux never got an official IDM port, and most download-manager alternatives are either abandoned, require Wine, or don't integrate with the browser. This one does — a Rust binary + a Chromium extension + a Tauri GUI, installed for the current user from source.
 
 ## Features
 
@@ -84,25 +81,6 @@ LDM button appears directly on video players - one click to download.
 
 ## Installation
 
-### AppImage (Recommended)
-
-1. Download `Linux_Download_Manager-x86_64.AppImage` from [Releases](https://github.com/ekremx25/linux-download-manager/releases/latest)
-2. Make it executable and run:
-   ```bash
-   chmod +x Linux_Download_Manager-x86_64.AppImage
-   ./Linux_Download_Manager-x86_64.AppImage
-   ```
-3. **First run** automatically:
-   - Installs native messaging host for browser integration
-   - Downloads [yt-dlp](https://github.com/yt-dlp/yt-dlp) to `~/.local/bin/`
-   - Copies browser extension files to `~/Documents/Linux Download Manager Extension/`
-   - Opens `chrome://extensions` with setup instructions
-
-4. **Browser extension setup** (one-time):
-   - Go to `chrome://extensions`
-   - Enable **Developer mode**
-   - Click **Load unpacked** → select `~/Documents/Linux Download Manager Extension/`
-
 ### System Requirements
 - **OS**: Linux (x86_64)
 - **Browser**: Google Chrome, Chromium, Brave, Edge, or Vivaldi
@@ -118,7 +96,7 @@ LDM button appears directly on video players - one click to download.
   sudo dnf install ffmpeg    # RPM Fusion, or use Fedora's ffmpeg-free
   ```
 
-### Build from Source
+### Install from Source
 
 ```bash
 # Clone
@@ -130,6 +108,8 @@ cd linux-download-manager
 ```
 
 The installer checks Rust and Tauri's WebKitGTK build libraries, installs missing packages with `dnf`, `pacman`, or `apt` using `sudo`, builds the app, and installs the browser bridge. On Fedora, `ffmpeg-free` is used if RPM Fusion's `ffmpeg` package is unavailable. On Arch and CachyOS, the same `pacman` packages are used. Loading the unpacked extension in the browser remains a one-time manual step.
+
+To load the browser extension, open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select `~/Documents/Linux Download Manager Extension/`.
 
 ## How It Works
 
@@ -158,7 +138,7 @@ Browser Extension  →  Native Host  →  App (Rust/Tauri)
 | Video Download | yt-dlp + ffmpeg |
 | Browser Extension | Manifest V3 (Chromium) |
 | Frontend | Vanilla HTML/CSS/JS |
-| Packaging | AppImage |
+| Packaging | Source installer |
 
 ## Project Structure
 
