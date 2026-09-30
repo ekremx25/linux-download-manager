@@ -10,7 +10,7 @@ use reqwest::Client;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -67,6 +67,7 @@ pub struct AppState {
     max_concurrent_downloads: AtomicUsize,
     default_bandwidth_limit_kbps: AtomicU64,
     queue: Mutex<DownloadQueueState>,
+    pub live_metrics: Mutex<HashMap<i64, (u64, Option<u64>)>>,
 }
 
 impl AppState {
@@ -112,6 +113,7 @@ impl AppState {
                 active: HashMap::new(),
                 pending: VecDeque::new(),
             }),
+            live_metrics: Mutex::new(HashMap::new()),
         })
     }
 
@@ -202,7 +204,7 @@ impl AppState {
                 send_download_notification(
                     app_handle,
                     "Browser integration error",
-                    format!("Tarayici inbox kuyruğu okunamadi: {error}"),
+                    format!("Failed to read browser queue: {error}"),
                 );
                 return Err(error);
             }
@@ -239,12 +241,12 @@ impl AppState {
                     acknowledge_staged_browser_request(&staged.path)?;
                     let source_details = source_title
                         .or(source_page_url)
-                        .map(|value| format!("Kaynak: {value}"))
-                        .unwrap_or_else(|| "Tarayicidan geldi.".to_string());
+                        .map(|value| format!("Source: {value}"))
+                        .unwrap_or_else(|| "Imported from browser.".to_string());
                     send_download_notification(
                         app_handle,
                         "Browser download queued",
-                        format!("{} kuyruga eklendi. {source_details}", record.file_name),
+                        format!("{} queued. {source_details}", record.file_name),
                     );
                 }
                 Err(error) => {
@@ -252,7 +254,7 @@ impl AppState {
                     send_download_notification(
                         app_handle,
                         "Browser download rejected",
-                        format!("{download_url} iceri aktarılamadi: {error}"),
+                        format!("Failed to import {download_url}: {error}"),
                     );
                 }
             }
@@ -273,6 +275,12 @@ impl AppState {
         active_parts: Option<usize>,
         error_message: Option<&str>,
     ) {
+        if status == "in_progress" {
+            self.live_metrics.lock().unwrap().insert(id, (speed_bytes_per_second.unwrap_or(0), eta_seconds));
+        } else {
+            self.live_metrics.lock().unwrap().remove(&id);
+        }
+
         let _ = app_handle.emit(
             DOWNLOAD_STATE_EVENT,
             DownloadStateEvent {
@@ -415,15 +423,22 @@ async fn run_download(
         .await;
 
     let speed_tracker = Arc::new(Mutex::new(SpeedTracker::new()));
+    let start_job_id = job.id;
+    let start_file_name = job
+        .target_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
 
     let mut on_started = {
         let storage = storage.clone_for_task();
         let app_handle = app_handle.clone();
         let speed_tracker = speed_tracker.clone();
+        let file_name = start_file_name.clone();
         move |downloaded_bytes: u64, total_bytes: Option<u64>, active_parts: usize| -> Result<(), String> {
             speed_tracker.lock().unwrap().reset(downloaded_bytes);
             storage.set_status(
-                job.id,
+                start_job_id,
                 "in_progress",
                 downloaded_bytes,
                 total_bytes.or(total_hint),
@@ -432,7 +447,7 @@ async fn run_download(
             let state = app_handle.state::<AppState>();
             state.emit_download_event(
                 &app_handle,
-                job.id,
+                start_job_id,
                 "in_progress",
                 downloaded_bytes,
                 total_bytes.or(total_hint),
@@ -441,10 +456,19 @@ async fn run_download(
                 Some(active_parts),
                 None,
             );
+
+            send_download_notification(
+                &app_handle,
+                "Download Started",
+                format!("Downloading {file_name}"),
+            );
+
             Ok(())
         }
     };
 
+    let progress_job_id = job.id;
+    let mut last_db_update = Instant::now();
     let mut on_progress = {
         let storage = storage.clone_for_task();
         let app_handle = app_handle.clone();
@@ -463,13 +487,19 @@ async fn run_download(
                 });
                 (Some(speed), eta)
             };
-            storage.set_status(
-                job.id,
-                "in_progress",
-                downloaded_bytes,
-                total_bytes.or(total_hint),
-                None,
-            )?;
+
+            // Only write to SQLite every 1.5s to keep disk I/O from bottlenecking high-speed downloads
+            if last_db_update.elapsed() >= Duration::from_millis(1500) {
+                let _ = storage.set_status(
+                    progress_job_id,
+                    "in_progress",
+                    downloaded_bytes,
+                    total_bytes.or(total_hint),
+                    None,
+                );
+                last_db_update = Instant::now();
+            }
+
             let state = app_handle.state::<AppState>();
             state.emit_download_event(
                 &app_handle,
@@ -558,7 +588,7 @@ async fn run_download(
             send_download_notification(
                 app_handle,
                 "Download completed",
-                format!("{} indirme tamamlandi.", job.target_path.file_name().unwrap_or_default().to_string_lossy()),
+                format!("{} download completed.", job.target_path.file_name().unwrap_or_default().to_string_lossy()),
             );
         }
         Err(error) => {
@@ -578,7 +608,7 @@ async fn run_download(
             send_download_notification(
                 app_handle,
                 "Download failed",
-                format!("Indirme basarisiz: {error}"),
+                format!("Download failed: {error}"),
             );
         }
     }
@@ -587,18 +617,28 @@ async fn run_download(
 }
 
 pub fn send_download_notification(app_handle: &AppHandle, title: &str, body: String) {
-    let _ = app_handle
+    let res = app_handle
         .notification()
         .builder()
         .title(title)
-        .body(body)
+        .body(&body)
         .show();
+
+    if res.is_err() {
+        let _ = std::process::Command::new("notify-send")
+            .arg("-a")
+            .arg("Linux Download Manager")
+            .arg(title)
+            .arg(&body)
+            .spawn();
+    }
 }
 
 struct SpeedTracker {
     last_bytes: u64,
     last_time: Instant,
     speed: u64,
+    initialized: bool,
 }
 
 impl SpeedTracker {
@@ -607,6 +647,7 @@ impl SpeedTracker {
             last_bytes: 0,
             last_time: Instant::now(),
             speed: 0,
+            initialized: false,
         }
     }
 
@@ -614,13 +655,26 @@ impl SpeedTracker {
         self.last_bytes = bytes;
         self.last_time = Instant::now();
         self.speed = 0;
+        self.initialized = true;
     }
 
     fn update(&mut self, bytes: u64) {
+        if !self.initialized {
+            self.last_bytes = bytes;
+            self.last_time = Instant::now();
+            self.initialized = true;
+            return;
+        }
+
         let elapsed = self.last_time.elapsed();
-        if elapsed >= Duration::from_secs(1) {
+        if elapsed >= Duration::from_millis(250) {
             let delta = bytes.saturating_sub(self.last_bytes);
-            self.speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
+            let instant_speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
+            if self.speed == 0 {
+                self.speed = instant_speed;
+            } else if instant_speed > 0 {
+                self.speed = ((self.speed as f64 * 0.65) + (instant_speed as f64 * 0.35)) as u64;
+            }
             self.last_bytes = bytes;
             self.last_time = Instant::now();
         }

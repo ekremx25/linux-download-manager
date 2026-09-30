@@ -4,6 +4,7 @@ mod commands;
 mod download;
 mod jobs;
 mod platform;
+mod single_instance;
 mod storage;
 
 use app::AppState;
@@ -11,13 +12,13 @@ use std::time::Duration;
 use tauri::image::Image;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Manager, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 
 pub use browser::{BrowserDownloadRequest, new_browser_download_request, stage_browser_request};
 pub use platform::{resolve_app_data_dir, resolve_default_download_dir};
+pub use single_instance::try_activate_existing_instance;
 
 pub fn run() {
-    let first_run = platform::is_first_run();
     platform::run_first_time_setup();
 
     let state = AppState::bootstrap().unwrap_or_else(|error| {
@@ -33,10 +34,17 @@ pub fn run() {
             let state = app_handle.state::<AppState>();
             state.restore_download_queue(&app_handle)?;
 
-            let show_item = MenuItemBuilder::with_id("show", "Göster").build(app)?;
-            let quit_item = MenuItemBuilder::with_id("quit", "Çıkış").build(app)?;
+            single_instance::start_single_instance_listener(app_handle.clone());
+
+            let show_item = MenuItemBuilder::with_id("show", "Show Linux Download Manager").build(app)?;
+            let add_item = MenuItemBuilder::with_id("add", "Add New Download...").build(app)?;
+            let settings_item = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
+            let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let tray_menu = MenuBuilder::new(app)
                 .item(&show_item)
+                .item(&add_item)
+                .separator()
+                .item(&settings_item)
                 .separator()
                 .item(&quit_item)
                 .build()?;
@@ -60,7 +68,24 @@ pub fn run() {
                                 let _ = window.set_focus();
                             }
                         }
+                        "add" => {
+                            if let Some(window) = handle_for_tray.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                                let _ = window.emit("tray-action", "add");
+                            }
+                        }
+                        "settings" => {
+                            if let Some(window) = handle_for_tray.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                                let _ = window.emit("tray-action", "settings");
+                            }
+                        }
                         "quit" => {
+                            single_instance::cleanup_socket();
                             handle_for_tray.exit(0);
                         }
                         _ => {}
@@ -92,11 +117,10 @@ pub fn run() {
                 });
             }
 
-            if first_run {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
             }
 
             tauri::async_runtime::spawn(async move {
@@ -121,7 +145,10 @@ pub fn run() {
             commands::resume_download,
             commands::cancel_download,
             commands::clear_completed,
-            commands::system_status
+            commands::system_status,
+            commands::delete_download,
+            commands::open_file,
+            commands::open_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

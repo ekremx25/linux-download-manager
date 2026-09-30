@@ -22,7 +22,17 @@ pub async fn inspect_url(
 
 #[tauri::command]
 pub async fn list_downloads(state: State<'_, AppState>) -> Result<Vec<DownloadRecord>, String> {
-    state.storage.list_downloads()
+    let mut list = state.storage.list_downloads()?;
+    let live = state.live_metrics.lock().unwrap();
+    for item in &mut list {
+        if item.status == "in_progress" {
+            if let Some(&(speed, eta)) = live.get(&item.id) {
+                item.speed_bytes_per_second = Some(speed);
+                item.eta_seconds = eta;
+            }
+        }
+    }
+    Ok(list)
 }
 
 #[tauri::command]
@@ -34,6 +44,7 @@ pub async fn start_download(
     expected_checksum: Option<String>,
     scheduled_at: Option<String>,
     bandwidth_limit_kbps: Option<u64>,
+    custom_file_name: Option<String>,
 ) -> Result<DownloadRecord, String> {
     queue_download_request(
         &app_handle,
@@ -49,7 +60,7 @@ pub async fn start_download(
             scheduled_at,
             bandwidth_limit_kbps,
             format: None,
-            source_title: None,
+            source_title: custom_file_name,
             force_ytdlp: false,
             stream_manifest: false,
         },
@@ -187,3 +198,53 @@ pub async fn system_status(state: State<'_, AppState>) -> Result<SystemStatus, S
         default_download_dir: state.default_download_dir.display().to_string(),
     })
 }
+
+#[tauri::command]
+pub async fn delete_download(
+    state: State<'_, AppState>,
+    id: i64,
+    delete_file: bool,
+) -> Result<(), String> {
+    let _ = state.cancel_download(id);
+    if let Ok(record) = state.storage.get_download(id) {
+        let path = std::path::PathBuf::from(&record.save_path);
+        let _ = state.download_service.remove_temp_artifacts(&path).await;
+        if delete_file && path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    state.storage.delete_download(id)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn open_file(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("File does not exist: {path}"));
+    }
+    std::process::Command::new("xdg-open")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("Failed to open file: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn open_folder(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    let target = if p.is_dir() {
+        p.to_path_buf()
+    } else {
+        p.parent().map(|parent| parent.to_path_buf()).unwrap_or_else(|| p.to_path_buf())
+    };
+    if !target.exists() {
+        return Err(format!("Folder does not exist: {}", target.display()));
+    }
+    std::process::Command::new("xdg-open")
+        .arg(target)
+        .spawn()
+        .map_err(|e| format!("Failed to open folder: {e}"))?;
+    Ok(())
+}
+

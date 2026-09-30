@@ -78,7 +78,7 @@ function disconnectExtension() {
   pageObserver?.disconnect();
   hoverButton?.remove();
   mediaOverlayRoot?.remove();
-  showToast("Eklenti yenilendi. Bu video sayfasını da yenileyin.", "info");
+  showToast("Extension reloaded. Please refresh this page.", "info");
 }
 
 function sendExtensionMessage(message, callback) {
@@ -99,7 +99,7 @@ function sendExtensionMessage(message, callback) {
       return;
     }
     clearCaptureTimeout();
-    showToast("Eklenti mesajı gönderilemedi: " + error.message, "error");
+    showToast("Failed to send extension message: " + error.message, "error");
   }
 }
 
@@ -141,6 +141,7 @@ function bootstrap() {
   createHoverButton();
   createMediaOverlay();
   createToastRoot();
+  refreshInlineDownloadButtons();
   scheduleCandidateReport();
   observePageChanges();
   refreshRecentMediaCandidates();
@@ -158,6 +159,7 @@ function bootstrap() {
   document.addEventListener("play", handleMediaSignal, true);
   window.addEventListener("popstate", handleRouteChange);
   window.addEventListener("hashchange", handleRouteChange);
+  document.addEventListener("yt-navigate-finish", () => detectLocationChange(true));
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type !== "native-capture-status") {
@@ -174,7 +176,7 @@ function bootstrap() {
 
 function createHoverButton() {
   // Sites with their own download control do not need a generic hover button.
-  if (hasInlineButtons() || hoverButton) {
+  if (isYtdlpSupportedSite() || hasInlineButtons() || hoverButton) {
     return;
   }
 
@@ -208,15 +210,35 @@ function createToastRoot() {
   document.documentElement.appendChild(toastRoot);
 }
 
+function isCandidateAlreadyDecorated(element) {
+  if (!element) return false;
+  if (element.dataset?.ldmDecorated === "true") return true;
+  if (element.querySelector?.(".ldm-site-btn, .ldm-inline-btn, .ldm-media-button, #ldm-yt-download-btn")) {
+    return true;
+  }
+  let cur = element;
+  for (let i = 0; i < 8 && cur; i++) {
+    if (cur.dataset?.ldmDecorated === "true" || cur.querySelector?.(".ldm-site-btn, .ldm-inline-btn, .ldm-media-button, #ldm-yt-download-btn")) {
+      return true;
+    }
+    cur = cur.parentElement;
+  }
+  return false;
+}
+
 function hasInlineButtons() {
-  return /reddit\.com|youtube\.com|x\.com|twitter\.com|facebook\.com|instagram\.com/i.test(window.location.hostname);
+  return (/youtube\.com|youtu\.be/i.test(window.location.hostname) && Boolean(document.querySelector("#ldm-yt-download-btn, .ldm-site-btn, .ldm-inline-btn"))) ||
+    (/facebook\.com|fb\.watch|instagram\.com|x\.com|twitter\.com|reddit\.com|tiktok\.com/i.test(window.location.hostname) && Boolean(document.querySelector(".ldm-site-btn")));
 }
 
 function handlePointerOver(event) {
-  if (hasInlineButtons()) return;
+  if (isYtdlpSupportedSite()) {
+    hideHoverButton();
+    return;
+  }
 
   const candidate = extractCandidateFromPoint(event);
-  if (!candidate) {
+  if (!candidate || candidate.kind === "media" || candidate.kind === "media-fallback" || isCandidateAlreadyDecorated(candidate.element)) {
     return;
   }
 
@@ -256,21 +278,21 @@ function handleHoverButtonClick(event) {
 
 function isYtdlpSupportedSite() {
   const host = window.location.hostname;
-  return /(youtube\.com|youtu\.be|x\.com|twitter\.com|facebook\.com|instagram\.com|fb\.watch)$/i.test(host);
+  return /(youtube\.com|youtu\.be|x\.com|twitter\.com|facebook\.com|instagram\.com|fb\.watch|reddit\.com|tiktok\.com|vimeo\.com|dailymotion\.com|twitch\.tv)$/i.test(host);
 }
 
 function showQualityPicker(candidate, anchorElement) {
   closeQualityPicker();
 
   const qualities = [
-    { label: "En iyi kalite", format: "bv*+ba/b" },
+    { label: "Best quality", format: "bv*+ba/b" },
     { label: "4K (2160p)", format: "bv*[height<=2160]+ba/b" },
     { label: "1440p", format: "bv*[height<=1440]+ba/b" },
     { label: "1080p", format: "bv*[height<=1080]+ba/b" },
     { label: "720p", format: "bv*[height<=720]+ba/b" },
     { label: "480p", format: "bv*[height<=480]+ba/b" },
     { label: "360p", format: "bv*[height<=360]+ba/b" },
-    { label: "Sadece ses", format: "ba/b" }
+    { label: "Audio only", format: "ba/b" }
   ];
 
   const picker = document.createElement("div");
@@ -297,7 +319,7 @@ function showQualityPicker(candidate, anchorElement) {
     color: #86e8ff !important;
     letter-spacing: 0.04em !important;
   `);
-  title.textContent = "Kalite Seçin";
+  title.textContent = "Select Quality";
   picker.appendChild(title);
 
   for (const quality of qualities) {
@@ -360,7 +382,7 @@ function handleQualityPickerOutsideClick(event) {
 }
 
 function resolveSourcePageUrl(candidate) {
-  if (candidate?.url && /^https?:\/\/.*(reddit\.com|x\.com|twitter\.com|youtube\.com|facebook\.com|instagram\.com)\//.test(candidate.url)) {
+  if (candidate?.url && /^https?:\/\/.*(reddit\.com|x\.com|twitter\.com|youtube\.com|facebook\.com|instagram\.com|tiktok\.com|vimeo\.com|dailymotion\.com)\//.test(candidate.url)) {
     return candidate.url;
   }
   return window.location.href;
@@ -455,37 +477,16 @@ function pulseHoverButton() {
 }
 
 function repositionHoverButton() {
+  if (isYtdlpSupportedSite() || isStickyMediaCandidate(activeCandidate)) {
+    hideHoverButton();
+    return;
+  }
   if (mediaOverlayRoot?.childElementCount > 0) {
     if (hoverButton) hoverButton.hidden = true;
     return;
   }
   if (!hoverButton || !activeCandidate) {
     hideHoverButton();
-    return;
-  }
-
-  if (isStickyMediaCandidate(activeCandidate)) {
-    const stickyElement = resolveCandidateAnchorElement(activeCandidate);
-    if (stickyElement) {
-      const rect = stickyElement.getBoundingClientRect();
-      if (!isVisibleMediaRect(rect)) {
-        hideHoverButton();
-        return;
-      }
-
-      hoverButton.style.position = "absolute";
-      hoverButton.style.right = "auto";
-      hoverButton.style.top = `${Math.max(8, rect.top + window.scrollY + 10)}px`;
-      hoverButton.style.left = `${Math.max(8, rect.right + window.scrollX - 44)}px`;
-      hoverButton.hidden = false;
-      return;
-    }
-
-    hoverButton.style.position = "fixed";
-    hoverButton.style.top = "18px";
-    hoverButton.style.left = "auto";
-    hoverButton.style.right = "18px";
-    hoverButton.hidden = false;
     return;
   }
 
@@ -544,14 +545,9 @@ function observePageChanges() {
     scheduleCandidateReport();
     scheduleMediaRefresh();
     scheduleMediaOverlayRefresh();
-    if (activeCandidate && !activeCandidate.element.isConnected && !isStickyMediaCandidate(activeCandidate)) {
+    refreshInlineDownloadButtons();
+    if (activeCandidate && !activeCandidate.element.isConnected) {
       hideHoverButton();
-    } else if (isStickyMediaCandidate(activeCandidate)) {
-      const recoveredCandidate = resolvePersistentMediaCandidate();
-      if (recoveredCandidate) {
-        activeCandidate = recoveredCandidate;
-        repositionHoverButton();
-      }
     }
   });
 
@@ -564,17 +560,10 @@ function observePageChanges() {
 }
 
 function handleMediaSignal(event) {
-  if (event?.target instanceof Element) {
-    const candidate = extractCandidateFromTarget(event.target);
-    if (candidate) {
-      activeCandidate = candidate;
-      repositionHoverButton();
-    }
-  }
-
   scheduleCandidateReport();
   scheduleMediaRefresh();
   scheduleMediaOverlayRefresh();
+  refreshInlineDownloadButtons();
 }
 
 function handleRouteChange() {
@@ -588,9 +577,15 @@ function detectLocationChange(force = false) {
 
   lastLocationHref = window.location.href;
   hideHoverButton();
+  if (isYtdlpSupportedSite() && hoverButton) {
+    hoverButton.hidden = true;
+    hoverButton.remove();
+    hoverButton = null;
+  }
   scheduleCandidateReport();
   scheduleMediaRefresh();
   scheduleMediaOverlayRefresh();
+  refreshInlineDownloadButtons();
 }
 
 function startPeriodicRefresh() {
@@ -602,6 +597,7 @@ function startPeriodicRefresh() {
     detectLocationChange();
     scheduleMediaRefresh();
     scheduleMediaOverlayRefresh();
+    refreshInlineDownloadButtons();
   }, 1200);
 }
 
@@ -727,13 +723,26 @@ function refreshMediaOverlay() {
     return;
   }
 
-  mediaOverlayRoot.replaceChildren();
-
   refreshInlineDownloadButtons();
 
-  const host = window.location.hostname;
-  if (/reddit\.com|youtube\.com|x\.com|twitter\.com|facebook\.com|instagram\.com/.test(host)) {
+  // If on a supported site (YouTube, Facebook, Twitter, Instagram, Reddit, etc.),
+  // direct on-player badges are used. Never render a duplicate floating overlay!
+  if (isYtdlpSupportedSite()) {
+    mediaOverlayRoot.replaceChildren();
     return;
+  }
+
+  // If any video on the page is already decorated with an on-player badge, do not float extra overlays
+  const decorated = document.querySelector(".ldm-site-btn, [data-ldm-decorated='true']");
+  if (decorated) {
+    const visibleVideos = Array.from(document.querySelectorAll("video")).filter((v) => {
+      const r = v.getBoundingClientRect();
+      return r.width > 120 && r.height > 80 && isVisibleMediaRect(r);
+    });
+    if (visibleVideos.length > 0 && visibleVideos.every((v) => isCandidateAlreadyDecorated(v))) {
+      mediaOverlayRoot.replaceChildren();
+      return;
+    }
   }
 
   const overlayTargets = collectOverlayTargets();
@@ -756,54 +765,261 @@ function refreshMediaOverlay() {
           }
         : {
             candidate: persistentCandidate,
-            pinned: true
+            pinned: false
           }
     );
   }
 
+  let validTarget = null;
   for (const target of overlayTargets) {
-    if (target.element?.querySelector?.(".ldm-inline-btn")) {
+    if (isCandidateAlreadyDecorated(target.element)) {
       continue;
     }
+    const rect = target.element?.getBoundingClientRect?.();
+    if (rect && isVisibleMediaRect(rect)) {
+      validTarget = { ...target, rect };
+      break;
+    }
+  }
 
-    const button = document.createElement("button");
+  if (!validTarget) {
+    mediaOverlayRoot.replaceChildren();
+    return;
+  }
+
+  let button = mediaOverlayRoot.querySelector(".ldm-media-button");
+  if (!button) {
+    button = document.createElement("button");
     button.type = "button";
     button.className = "ldm-media-button";
-    button.textContent = "⬇ LDM İndir";
-    if (target.pinned) {
-      // Without a player anchor, a floating button could cover the video.
-      continue;
-    } else {
-      const rect = target.element.getBoundingClientRect();
-      if (!isVisibleMediaRect(rect)) {
-        continue;
-      }
-
-      button.style.setProperty("top", `${rect.top - 8}px`, "important");
-      button.style.setProperty("left", `${rect.right - 8}px`, "important");
-      button.style.setProperty("transform", "translate(-100%, -100%)", "important");
-      button.style.setProperty("right", "auto", "important");
-    }
-
+    button.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:-1px;margin-right:5px;flex-shrink:0;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg><span>Download</span>`;
     button.addEventListener("pointerdown", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      activeCandidate = target.candidate;
-      triggerCaptureOnce(target.candidate, button);
+      if (activeCandidate) {
+        triggerCaptureOnce(activeCandidate, button);
+      }
     });
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
     });
-    mediaOverlayRoot.appendChild(button);
-    if (hoverButton) hoverButton.hidden = true;
-    break;
+    mediaOverlayRoot.replaceChildren(button);
   }
+
+  activeCandidate = validTarget.candidate;
+  const rect = validTarget.rect;
+  const top = Math.max(12, Math.min(rect.top + 12, window.innerHeight - 50));
+  const right = Math.max(12, Math.min(window.innerWidth - rect.right + 12, window.innerWidth - 140));
+  button.style.setProperty("top", `${top}px`, "important");
+  button.style.setProperty("right", `${right}px`, "important");
+  button.style.setProperty("left", "auto", "important");
+  button.style.setProperty("transform", "none", "important");
+  button.style.setProperty("display", "block", "important");
+
+  if (hoverButton) hoverButton.hidden = true;
+}
+
+function createSiteVideoBadge(onClick, label = "Download") {
+  const btn = document.createElement("div");
+  btn.className = "ldm-site-btn";
+  btn.setAttribute("role", "button");
+  btn.setAttribute("tabindex", "0");
+  btn.setAttribute("title", "Download with Linux Download Manager");
+  btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:-1px;margin-right:5px;flex-shrink:0;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg><span>${label}</span>`;
+  btn.setAttribute("style", `
+    position: absolute !important;
+    top: 10px !important;
+    right: 10px !important;
+    z-index: 2147483647 !important;
+    background: linear-gradient(135deg, #10b981, #06b6d4) !important;
+    color: #04110d !important;
+    border: 0 !important;
+    border-radius: 9999px !important;
+    padding: 6px 13px !important;
+    font: 700 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+    letter-spacing: 0.02em !important;
+    cursor: pointer !important;
+    pointer-events: auto !important;
+    user-select: none !important;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.38) !important;
+    opacity: 0.9 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    white-space: nowrap !important;
+    transition: opacity 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease !important;
+  `);
+
+  btn.addEventListener("mouseenter", () => {
+    btn.style.setProperty("opacity", "1", "important");
+    btn.style.setProperty("transform", "translateY(-1px) scale(1.02)", "important");
+    btn.style.setProperty("box-shadow", "0 6px 18px rgba(0,0,0,0.48)", "important");
+  });
+  btn.addEventListener("mouseleave", () => {
+    btn.style.setProperty("opacity", "0.9", "important");
+    btn.style.setProperty("transform", "none", "important");
+    btn.style.setProperty("box-shadow", "0 4px 14px rgba(0,0,0,0.38)", "important");
+  });
+  btn.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+  }, true);
+  btn.addEventListener("pointerup", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+  }, true);
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    onClick(btn);
+  }, true);
+
+  return btn;
+}
+
+function findTightVideoContainer(video) {
+  const rect = video.getBoundingClientRect?.() ?? { width: 640, height: 360 };
+  if (rect.width <= 0 || rect.height <= 0) {
+    return video.parentElement;
+  }
+  let current = video.parentElement;
+  let best = current;
+
+  while (current && current !== document.body && current !== document.documentElement) {
+    const cRect = current.getBoundingClientRect?.() ?? rect;
+    // Do not climb into post cards, feeds, dialogs, or the whole page
+    if (cRect.height > Math.max(rect.height * 1.25, rect.height + 60)) {
+      break;
+    }
+    if (cRect.width > Math.max(rect.width * 1.25, rect.width + 100)) {
+      break;
+    }
+    best = current;
+
+    const style = window.getComputedStyle?.(current) ?? { position: "static" };
+    if (
+      (style.position === "relative" || style.position === "absolute") &&
+      (current.matches?.('[data-testid*="video" i], [class*="video" i], [class*="player" i]') ||
+       current.querySelector?.("video") === video)
+    ) {
+      if (cRect.width >= rect.width * 0.9 && cRect.height >= rect.height * 0.9) {
+        best = current;
+        break;
+      }
+    }
+    current = current.parentElement;
+  }
+
+  return best || video.parentElement;
+}
+
+function findFacebookVideoContainer(video) {
+  // Strategy 1: Known Facebook player wrappers
+  const known = video.closest?.(
+    'div[data-pagelet*="Video"], div[data-video-id], div[aria-label*="video" i], div[data-testid*="video" i], div[data-virtualized]'
+  );
+  if (known && !known.matches?.('div[role="article"], div[data-pagelet*="FeedUnit"], div[role="feed"], div[role="main"]')) {
+    return known;
+  }
+
+  // Strategy 2: Climb up from video.parentElement, stopping before entering the post article card
+  let cur = video.parentElement;
+  let best = cur;
+
+  while (cur && cur !== document.body && cur !== document.documentElement) {
+    if (cur.matches?.('div[role="article"], div[data-pagelet*="FeedUnit"], div[role="feed"], div[role="main"]')) {
+      break;
+    }
+    // If cur contains post action buttons or post caption text, we've climbed into the card content
+    if (cur.querySelector?.('[data-ad-preview="message"], [aria-label*="Comment" i], [aria-label*="Like" i], [aria-label*="Share" i], form')) {
+      break;
+    }
+
+    const r = cur.getBoundingClientRect?.();
+    if (r && r.width >= 100 && r.height >= 60) {
+      best = cur;
+      const style = window.getComputedStyle?.(cur);
+      if (style?.position === "relative" || style?.position === "absolute") {
+        return cur;
+      }
+    }
+    cur = cur.parentElement;
+  }
+
+  // If best is still the direct parent, climb one level if safe to clear inner overflow-hidden clipping
+  if (best === video.parentElement && best?.parentElement) {
+    const parent2 = best.parentElement;
+    if (!parent2.matches?.('div[role="article"], div[data-pagelet*="FeedUnit"]') &&
+        !parent2.querySelector?.('[data-ad-preview="message"], [aria-label*="Comment" i]')) {
+      return parent2;
+    }
+  }
+
+  return best || video.parentElement;
+}
+
+function extractFacebookVideoUrl(video, container) {
+  if (/\/videos\/|\/reel\/|\/reels\/|\/watch/.test(window.location.pathname)) {
+    return window.location.href;
+  }
+
+  const videoIdEl = video.closest?.("[data-video-id]") || container?.closest?.("[data-video-id]");
+  if (videoIdEl) {
+    const vid = videoIdEl.getAttribute("data-video-id");
+    if (vid) return `https://www.facebook.com/watch/?v=${vid}`;
+  }
+
+  const post = video.closest?.('div[role="article"], div[data-pagelet*="FeedUnit"], article, div[data-virtualized]') || container?.parentElement;
+  if (post) {
+    const videoLink = post.querySelector?.(
+      'a[href*="/videos/"], a[href*="/reel/"], a[href*="/reels/"], a[href*="/watch/"], a[href*="/watch?"], a[href*="fb.watch"], a[href*="video.php"]'
+    );
+    if (videoLink?.href) return videoLink.href;
+
+    const permalink = post.querySelector?.(
+      'a[href*="/posts/"], a[href*="permalink.php"], a[href*="story_fbid="]'
+    );
+    if (permalink?.href) return permalink.href;
+
+    const timeLinks = post.querySelectorAll?.('span > a[role="link"], a[href*="facebook.com"]');
+    for (const tl of timeLinks) {
+      if (tl.href && !tl.href.includes("#") && !tl.href.includes("/groups/") && !tl.href.includes("/user/")) {
+        if (/\/(posts|videos|reel|stories)\//.test(tl.href) || /story_fbid=/.test(tl.href)) {
+          return tl.href;
+        }
+      }
+    }
+  }
+
+  if (video.currentSrc && /^https?:\/\//.test(video.currentSrc) && !video.currentSrc.startsWith("blob:")) {
+    return video.currentSrc;
+  }
+  if (video.src && /^https?:\/\//.test(video.src) && !video.src.startsWith("blob:")) {
+    return video.src;
+  }
+
+  return window.location.href;
+}
+
+function extractFacebookVideoTitle(video, container) {
+  const post = video.closest?.('div[role="article"], div[data-pagelet*="FeedUnit"], article, div[data-virtualized]') || container?.parentElement;
+  if (post) {
+    const textEl = post.querySelector?.('[data-ad-preview="message"], [dir="auto"]');
+    if (textEl?.textContent?.trim()) {
+      const t = textEl.textContent.trim();
+      return t.length > 80 ? t.substring(0, 80) : t;
+    }
+  }
+  return document.title || "Facebook Video";
 }
 
 function refreshInlineDownloadButtons() {
   const host = window.location.hostname;
-  if (/youtube\.com/.test(host)) {
+  if (/youtube\.com|youtu\.be/.test(host)) {
     injectYouTubeButton();
   }
   if (/reddit\.com/.test(host)) {
@@ -812,63 +1028,134 @@ function refreshInlineDownloadButtons() {
   if (/x\.com|twitter\.com/.test(host)) {
     injectTwitterButtons();
   }
+  if (/facebook\.com|fb\.watch/.test(host)) {
+    injectFacebookButtons();
+  }
+  if (/instagram\.com/.test(host)) {
+    injectInstagramButtons();
+  }
+  injectGenericVideoButtons();
+}
+
+function injectFacebookButtons() {
+  const videos = document.querySelectorAll("video");
+  for (const video of videos) {
+    const rect = video.getBoundingClientRect?.() ?? { width: 0, height: 0 };
+    const container = findFacebookVideoContainer(video);
+    if (!container) continue;
+
+    const cRect = container.getBoundingClientRect?.() ?? rect;
+    const effectiveWidth = Math.max(rect.width, cRect.width);
+    const effectiveHeight = Math.max(rect.height, cRect.height);
+    if (effectiveWidth < 100 || effectiveHeight < 60) {
+      continue;
+    }
+
+    if (container.querySelector(".ldm-site-btn")) {
+      continue;
+    }
+
+    if (container.parentElement?.querySelector(":scope > .ldm-site-btn") ||
+        video.parentElement?.querySelector(".ldm-site-btn")) {
+      continue;
+    }
+
+    const btn = createSiteVideoBadge((buttonEl) => {
+      const postUrl = extractFacebookVideoUrl(video, container) || window.location.href;
+      const postTitle = extractFacebookVideoTitle(video, container);
+
+      const candidate = {
+        element: video,
+        url: postUrl,
+        kind: "media-fallback",
+        title: postTitle
+      };
+      activeCandidate = candidate;
+      triggerCaptureForCandidate(candidate, buttonEl);
+    }, "Download");
+
+    btn.style.setProperty("position", "absolute", "important");
+    btn.style.setProperty("top", "12px", "important");
+    btn.style.setProperty("right", "12px", "important");
+    btn.style.setProperty("left", "auto", "important");
+    btn.style.setProperty("z-index", "2147483647", "important");
+    btn.style.setProperty("pointer-events", "auto", "important");
+
+    const parentPos = window.getComputedStyle?.(container)?.position;
+    if (!parentPos || parentPos === "static") {
+      container.style.setProperty("position", "relative", "important");
+    }
+
+    container.appendChild(btn);
+  }
+}
+
+function injectInstagramButtons() {
+  for (const video of document.querySelectorAll("video")) {
+    const rect = video.getBoundingClientRect?.() ?? { width: 640, height: 360 };
+    const container = findTightVideoContainer(video);
+    if (!container || container.querySelector(".ldm-site-btn")) continue;
+
+    const cRect = container.getBoundingClientRect?.() ?? rect;
+    if (Math.max(rect.width, cRect.width) < 120 || Math.max(rect.height, cRect.height) < 80) continue;
+
+    const btn = createSiteVideoBadge((buttonEl) => {
+      let postUrl = null;
+      const post = video.closest?.("article, main, div[role='dialog']");
+      const link = post?.querySelector?.('a[href*="/p/"], a[href*="/reel/"], a[href*="/reels/"]');
+      if (link?.href) {
+        postUrl = link.href;
+      } else if (/\/p\/|\/reel\//.test(window.location.pathname)) {
+        postUrl = window.location.href;
+      }
+
+      const candidate = {
+        element: video,
+        url: postUrl || window.location.href,
+        kind: "media-fallback",
+        title: "Instagram Video"
+      };
+      activeCandidate = candidate;
+      triggerCaptureForCandidate(candidate, buttonEl);
+    }, "Download");
+
+    btn.style.setProperty("position", "absolute", "important");
+    btn.style.setProperty("top", "12px", "important");
+    btn.style.setProperty("right", "12px", "important");
+    btn.style.setProperty("z-index", "2147483647", "important");
+
+    const parentPos = window.getComputedStyle?.(container)?.position;
+    if (!parentPos || parentPos === "static") {
+      container.style.setProperty("position", "relative", "important");
+    }
+    container.appendChild(btn);
+  }
 }
 
 function injectRedditButtons() {
   for (const player of document.querySelectorAll("shreddit-player, shreddit-player-2")) {
-    if (player.querySelector(".ldm-site-btn")) continue;
+    if (player.querySelector?.(".ldm-site-btn")) continue;
 
-    const post = player.closest("shreddit-post, article, [class*='Post']");
+    const post = player.closest?.("shreddit-post, article, [class*='Post']");
     if (!post) continue;
-    if (post.querySelector(".ldm-site-btn")) continue;
+    if (post.querySelector?.(".ldm-site-btn")) continue;
 
-    const btn = document.createElement("div");
-    btn.className = "ldm-site-btn";
-    btn.textContent = "⬇ LDM İndir";
-    btn.setAttribute("style", `
-      display: block !important;
-      z-index: 2147483647 !important;
-      background: linear-gradient(135deg, #3dd29f, #86e8ff) !important;
-      color: #04110d !important;
-      border: 0 !important;
-      border-radius: 6px !important;
-      padding: 8px 16px !important;
-      font: 700 12px/1 sans-serif !important;
-      letter-spacing: 0.04em !important;
-      cursor: pointer !important;
-      pointer-events: auto !important;
-      user-select: none !important;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.15) !important;
-      margin: 6px 0 !important;
-      width: fit-content !important;
-    `);
-
-    btn.addEventListener("mouseenter", () => btn.style.setProperty("opacity", "1", "important"));
-    btn.addEventListener("mouseleave", () => btn.style.setProperty("opacity", "0.85", "important"));
-    btn.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); }, true);
-    btn.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-
+    const btn = createSiteVideoBadge((buttonEl) => {
       let hlsUrl = null;
       const shadowRoot = player.shadowRoot;
       if (shadowRoot) {
-        const videoEl = shadowRoot.querySelector("video");
+        const videoEl = shadowRoot.querySelector?.("video");
         if (videoEl && videoEl.src && !videoEl.src.startsWith("blob:")) {
           hlsUrl = videoEl.src;
         }
       }
 
       if (!hlsUrl) {
-        const src = player.getAttribute("src")
-          || player.getAttribute("packaged-media-json");
+        const src = player.getAttribute?.("src") || player.getAttribute?.("packaged-media-json");
         if (src) {
           try {
             const data = JSON.parse(src);
-            hlsUrl = data?.playbackMp4s?.permutations?.[0]?.source?.url
-              || data?.hlsUrl
-              || data?.fallbackUrl;
+            hlsUrl = data?.playbackMp4s?.permutations?.[0]?.source?.url || data?.hlsUrl || data?.fallbackUrl;
           } catch (_) {
             if (src.includes(".m3u8") || src.includes("v.redd.it")) {
               hlsUrl = src;
@@ -878,18 +1165,19 @@ function injectRedditButtons() {
       }
 
       if (!hlsUrl) {
-        const permalink = player.closest("shreddit-post")?.getAttribute("permalink");
+        const permalink = player.closest?.("shreddit-post")?.getAttribute?.("permalink");
         if (permalink) {
           hlsUrl = "https://www.reddit.com" + permalink;
         }
       }
 
       if (hlsUrl) {
-        const shredditPost = player.closest("shreddit-post");
-        const postTitle = shredditPost?.getAttribute("post-title")
-          || shredditPost?.querySelector('[slot="title"]')?.textContent?.trim()
-          || post.querySelector("h1, h3, [data-testid='post-title']")?.textContent?.trim()
-          || document.title;
+        const shredditPost = player.closest?.("shreddit-post");
+        const postTitle =
+          shredditPost?.getAttribute?.("post-title") ||
+          shredditPost?.querySelector?.('[slot="title"]')?.textContent?.trim() ||
+          post.querySelector?.("h1, h3, [data-testid='post-title']")?.textContent?.trim() ||
+          document.title;
 
         showToast("Sending download to Linux Download Manager...", "info");
         armCaptureTimeout();
@@ -901,7 +1189,7 @@ function injectRedditButtons() {
             sourceTitle: postTitle
           }
         }, (response) => {
-          if (chrome.runtime.lastError) {
+          if (chrome.runtime?.lastError) {
             clearCaptureTimeout();
             showToast(chrome.runtime.lastError.message, "error");
             return;
@@ -912,9 +1200,9 @@ function injectRedditButtons() {
           }
         });
       } else {
-        showToast("Video URL bulunamadı.", "error");
+        showToast("Video URL not found.", "error");
       }
-    }, true);
+    }, "Download");
 
     player.insertAdjacentElement("beforebegin", btn);
   }
@@ -922,53 +1210,25 @@ function injectRedditButtons() {
 
 function injectTwitterButtons() {
   for (const video of document.querySelectorAll("video")) {
-    const videoContainer = video.closest('[data-testid="videoComponent"], [data-testid="videoPlayer"]') || video.parentElement;
+    const videoContainer = video.closest?.('[data-testid="videoComponent"], [data-testid="videoPlayer"]') || findTightVideoContainer(video);
     if (!videoContainer || videoContainer.querySelector(".ldm-site-btn")) continue;
 
-    const tweet = video.closest("article");
+    const rect = video.getBoundingClientRect?.() ?? { width: 640, height: 360 };
+    const cRect = videoContainer.getBoundingClientRect?.() ?? rect;
+    if (Math.max(rect.width, cRect.width) < 80 || Math.max(rect.height, cRect.height) < 60) continue;
 
-    const rect = video.getBoundingClientRect();
-    if (rect.width < 80 || rect.height < 60) continue;
+    const tweet = video.closest?.("article");
 
-    let postUrl = null;
-    const timeLink = tweet?.querySelector('a[href*="/status/"] time')?.closest("a");
-    if (timeLink) postUrl = timeLink.href;
-    else if (tweet?.querySelector('a[href*="/status/"]')) {
-      postUrl = tweet.querySelector('a[href*="/status/"]').href;
-    } else if (/\/status\/\d+/.test(window.location.pathname)) postUrl = window.location.href;
+    const btn = createSiteVideoBadge((buttonEl) => {
+      let postUrl = null;
+      const timeLink = tweet?.querySelector?.('a[href*="/status/"] time')?.closest?.("a");
+      if (timeLink) postUrl = timeLink.href;
+      else if (tweet?.querySelector?.('a[href*="/status/"]')) {
+        postUrl = tweet.querySelector('a[href*="/status/"]').href;
+      } else if (/\/status\/\d+/.test(window.location.pathname)) postUrl = window.location.href;
 
-    const btn = document.createElement("div");
-    btn.className = "ldm-site-btn";
-    btn.textContent = "⬇ LDM";
-    btn.setAttribute("style", `
-      position: absolute !important;
-      top: 8px !important;
-      right: 8px !important;
-      z-index: 2147483647 !important;
-      background: linear-gradient(135deg, #3dd29f, #86e8ff) !important;
-      color: #04110d !important;
-      border: 0 !important;
-      border-radius: 6px !important;
-      padding: 6px 14px !important;
-      font: 700 12px/1 sans-serif !important;
-      cursor: pointer !important;
-      pointer-events: auto !important;
-      user-select: none !important;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.4) !important;
-      opacity: 0.85 !important;
-      transition: opacity 0.15s !important;
-    `);
-
-    btn.addEventListener("mouseenter", () => btn.style.setProperty("opacity", "1", "important"));
-    btn.addEventListener("mouseleave", () => btn.style.setProperty("opacity", "0.85", "important"));
-    btn.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); }, true);
-    btn.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-
-      const tweetText = tweet?.querySelector('[data-testid="tweetText"]')?.textContent?.trim();
-      const userName = tweet?.querySelector('[data-testid="User-Name"] a')?.textContent?.trim();
+      const tweetText = tweet?.querySelector?.('[data-testid="tweetText"]')?.textContent?.trim();
+      const userName = tweet?.querySelector?.('[data-testid="User-Name"] a')?.textContent?.trim();
       const title = tweetText
         ? (tweetText.length > 80 ? tweetText.substring(0, 80) : tweetText)
         : (userName ? `${userName} video` : null);
@@ -980,83 +1240,111 @@ function injectTwitterButtons() {
         title: title
       };
       activeCandidate = candidate;
-      triggerCaptureForCandidate(candidate, btn);
-    }, true);
+      triggerCaptureForCandidate(candidate, buttonEl);
+    }, "Download");
 
-    const parentPos = window.getComputedStyle(videoContainer).position;
-    if (parentPos === "static") {
-      videoContainer.style.setProperty("position", "relative", "");
+    btn.style.setProperty("position", "absolute", "important");
+    btn.style.setProperty("top", "12px", "important");
+    btn.style.setProperty("right", "12px", "important");
+    btn.style.setProperty("z-index", "2147483647", "important");
+
+    const parentPos = window.getComputedStyle?.(videoContainer)?.position;
+    if (!parentPos || parentPos === "static") {
+      videoContainer.style.setProperty("position", "relative", "important");
     }
     videoContainer.appendChild(btn);
   }
 }
 
 function injectYouTubeButton() {
-  if (document.getElementById("ldm-yt-download-btn")) return;
-
   const player = document.querySelector("#movie_player, .html5-video-player");
-  if (!player) return;
+  if (player) {
+    const existing = document.getElementById("ldm-yt-download-btn");
+    if (!existing || !player.contains(existing)) {
+      if (existing) existing.remove();
 
-  const btn = document.createElement("div");
-  btn.id = "ldm-yt-download-btn";
-  btn.textContent = "LDM";
-  btn.setAttribute("style", `
-    position: absolute !important;
-    top: 12px !important;
-    left: 12px !important;
-    z-index: 2147483647 !important;
-    background: linear-gradient(135deg, #3dd29f, #86e8ff) !important;
-    color: #04110d !important;
-    border: 0 !important;
-    border-radius: 6px !important;
-    padding: 8px 16px !important;
-    font: 700 13px/1 sans-serif !important;
-    letter-spacing: 0.08em !important;
-    cursor: pointer !important;
-    text-transform: uppercase !important;
-    opacity: 0.85 !important;
-    pointer-events: auto !important;
-    user-select: none !important;
-    transition: opacity 0.15s !important;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.4) !important;
-  `);
+      const btn = createSiteVideoBadge((buttonEl) => {
+        const videoEl = player.querySelector("video") || document.querySelector("video");
+        const titleEl = document.querySelector("h1.ytd-watch-metadata, #title h1, h1.title, ytd-watch-metadata #title");
+        const candidate = {
+          element: videoEl || null,
+          url: window.location.href,
+          kind: "media-fallback",
+          title: titleEl?.textContent?.trim() || document.title
+        };
+        activeCandidate = candidate;
+        triggerCaptureForCandidate(candidate, buttonEl);
+      }, "Download");
 
-  btn.addEventListener("mouseenter", () => {
-    btn.style.setProperty("opacity", "1", "important");
-  });
-  btn.addEventListener("mouseleave", () => {
-    btn.style.setProperty("opacity", "0.85", "important");
-  });
+      btn.id = "ldm-yt-download-btn";
+      btn.style.setProperty("top", "12px", "important");
+      btn.style.setProperty("right", "12px", "important");
+      btn.style.setProperty("left", "auto", "important");
+      btn.style.setProperty("z-index", "2147483647", "important");
 
-  btn.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    e.stopImmediatePropagation();
-  }, true);
+      const playerPos = window.getComputedStyle?.(player)?.position;
+      if (playerPos === "static") {
+        player.style.setProperty("position", "relative", "important");
+      }
+      player.appendChild(btn);
+    }
+  }
 
-  btn.addEventListener("pointerup", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    e.stopImmediatePropagation();
-  }, true);
+  if (window.location.pathname.startsWith("/shorts/")) {
+    const activeShort = document.querySelector("ytd-reel-video-renderer[is-active], ytd-shorts [is-active]");
+    if (activeShort && !activeShort.querySelector(".ldm-site-btn")) {
+      const btn = createSiteVideoBadge((buttonEl) => {
+        const candidate = {
+          element: activeShort.querySelector("video") || null,
+          url: window.location.href,
+          kind: "media-fallback",
+          title: activeShort.querySelector("#title, .title")?.textContent?.trim() || document.title
+        };
+        activeCandidate = candidate;
+        triggerCaptureForCandidate(candidate, buttonEl);
+      }, "Download");
+      btn.style.setProperty("top", "20px", "important");
+      btn.style.setProperty("right", "20px", "important");
+      btn.style.setProperty("z-index", "2147483647", "important");
+      const pos = window.getComputedStyle?.(activeShort)?.position;
+      if (pos === "static") {
+        activeShort.style.setProperty("position", "relative", "important");
+      }
+      activeShort.appendChild(btn);
+    }
+  }
+}
 
-  btn.addEventListener("click", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    e.stopImmediatePropagation();
+function injectGenericVideoButtons() {
+  if (isYtdlpSupportedSite()) return;
 
-    const videoEl = document.querySelector("#movie_player video");
-    const candidate = {
-      element: videoEl || null,
-      url: null,
-      kind: "media-fallback"
+  for (const video of document.querySelectorAll("video")) {
+    const rect = video.getBoundingClientRect?.() ?? { width: 640, height: 360 };
+    if (rect.width < 140 || rect.height < 90) continue;
+
+    const container = findTightVideoContainer(video);
+    if (!container || container.querySelector?.(".ldm-site-btn")) continue;
+    if (isCandidateAlreadyDecorated(container)) continue;
+
+    const candidate = extractCandidateFromTarget(video) || {
+      element: video,
+      url: video.currentSrc || video.src || recentMediaCandidates[0] || null,
+      kind: "media"
     };
-    activeCandidate = candidate;
-    triggerCaptureForCandidate(candidate, btn);
-  }, true);
 
-  player.style.setProperty("position", "relative", "");
-  player.appendChild(btn);
+    if (!candidate.url && recentMediaCandidates.length === 0) continue;
+
+    const btn = createSiteVideoBadge((buttonEl) => {
+      activeCandidate = candidate;
+      triggerCaptureForCandidate(candidate, buttonEl);
+    }, "Download");
+
+    const parentPos = window.getComputedStyle?.(container)?.position;
+    if (parentPos === "static") {
+      container.style.setProperty("position", "relative", "important");
+    }
+    container.appendChild(btn);
+  }
 }
 
 function isSameCandidate(left, right) {
