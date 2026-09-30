@@ -1,4 +1,10 @@
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if linux_download_manager::try_activate_existing_instance(&args) {
+        println!("Linux Download Manager is already running. Brought existing window to focus.");
+        return;
+    }
+
     // WebKit2GTK 4.1 + recent Mesa (Arch rolling, Fedora 40+, Ubuntu 24.04+)
     // has two separate bugs:
     //   1. The dmabuf renderer path crashes with SIGSEGV at startup.

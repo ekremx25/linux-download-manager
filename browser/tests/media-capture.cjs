@@ -63,5 +63,5 @@ context.console = {warn() {}};
 listeners['chrome.runtime.onMessage']({type:'capture-best-media',payload:{sourcePageUrl:page}},
   {tab:{id:99,url:page}}, reply => {failureReply = reply;});
 assert.equal(failureReply.ok, false);
-assert.match(failureReply.error, /Video akışı/);
+assert.match(failureReply.error, /Video stream/);
 console.log('Failed diagnostic export still returns capture error.');

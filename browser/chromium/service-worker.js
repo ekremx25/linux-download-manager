@@ -5,40 +5,31 @@ const MENU_DOWNLOAD_MEDIA = "linux-download-manager.media";
 const BADGE_COLOR = "#0e9f6e";
 const MAX_MEDIA_CANDIDATES = 12;
 const DOWNLOADABLE_EXTENSIONS = new Set([
-  "7z",
-  "apk",
-  "appimage",
-  "avi",
-  "bin",
-  "csv",
-  "deb",
-  "dmg",
-  "epub",
-  "exe",
-  "flac",
-  "gz",
-  "img",
-  "iso",
-  "m4a",
-  "mkv",
-  "mov",
-  "mp3",
-  "mp4",
-  "msi",
-  "ogg",
-  "pdf",
-  "pkg",
-  "rar",
-  "rpm",
-  "tar",
-  "tgz",
-  "torrent",
-  "wav",
-  "webm",
-  "zip"
+  // Compressed / Archives
+  "7z", "ace", "apk", "appimage", "arc", "arj", "bin", "bz2", "bzip2", "cab", "cue",
+  "deb", "dmg", "epub", "exe", "flatpakref", "flatpakrepo", "gz", "gzip", "img", "iso",
+  "jar", "lz", "lzma", "lzo", "msi", "nrg", "pkg", "qcow2", "rar", "rom", "rpm", "snap",
+  "tar", "tbz2", "tgz", "txz", "tz", "vdi", "vmdk", "war", "xz", "z", "zip", "zipx", "zst",
+  // Media / Audio / Video
+  "3gp", "aac", "aiff", "alac", "amr", "ape", "asf", "avi", "divx", "flac", "flv", "m2ts",
+  "m4a", "m4b", "m4v", "mkv", "mov", "mp3", "mp4", "mpeg", "mpg", "oga", "ogg", "ogv",
+  "opus", "rm", "rmvb", "ts", "vob", "wav", "webm", "wma", "wmv",
+  // Documents / Data
+  "azw3", "csv", "djvu", "doc", "docx", "mobi", "odp", "ods", "odt", "pdf", "ppt", "pptx",
+  "rtf", "torrent", "tsv", "xls", "xlsx"
 ]);
 const STREAMING_EXTENSIONS = new Set(["m3u8", "mpd", "m4s", "ts", "aac", "m3u"]);
 const IMAGE_EXTENSIONS = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp"]);
+
+function getExtension(str) {
+  if (!str) return "";
+  const clean = str.split("?")[0].split("#")[0].replace(/\/+$/, "");
+  const lastDot = clean.lastIndexOf(".");
+  if (lastDot === -1) return "";
+  const ext = clean.slice(lastDot + 1).toLowerCase();
+  if (ext.length > 10 || ext.includes("/")) return "";
+  return ext;
+}
 const recentCaptures = new Map();
 const recentMediaByTab = new Map();
 const captureDiagnostics = new Map();
@@ -94,17 +85,17 @@ chrome.action.onClicked.addListener((tab) => {
   if (payload?.ok) {
     queueNativeCapture(payload.capture, tab?.id);
   } else {
-    notifyTab(tab?.id, "error", payload?.error ?? "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin.");
+    notifyTab(tab?.id, "error", payload?.error ?? "Video stream not captured yet. Please refresh the page and play the video, then try again.");
   }
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === MENU_DOWNLOAD_LINK) {
-    sendToNativeHost({
+    enrichCaptureWithMediaCookies({
       url: info.linkUrl,
       sourcePageUrl: tab?.url ?? null,
       sourceTitle: tab?.title ?? null
-    });
+    }, tab?.id).then((payload) => sendToNativeHost(payload, tab?.id));
     return;
   }
 
@@ -118,17 +109,17 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     if (payload?.ok) {
       queueNativeCapture(payload.capture, tab?.id);
     } else {
-      notifyTab(tab?.id, "error", payload?.error ?? "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin.");
+      notifyTab(tab?.id, "error", payload?.error ?? "Video stream not captured yet. Please refresh the page and play the video, then try again.");
     }
     return;
   }
 
   if (info.menuItemId === MENU_DOWNLOAD_MEDIA) {
-    sendToNativeHost({
+    enrichCaptureWithMediaCookies({
       url: info.srcUrl,
       sourcePageUrl: tab?.url ?? null,
       sourceTitle: tab?.title ?? null
-    });
+    }, tab?.id).then((payload) => sendToNativeHost(payload, tab?.id));
   }
 });
 
@@ -209,7 +200,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!payload?.ok) {
       sendResponse({
         ok: false,
-        error: payload?.error ?? "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin."
+        error: payload?.error ?? "Video stream not captured yet. Please refresh the page and play the video, then try again."
       });
       try { saveCaptureDiagnostic(tabId, sender.tab?.url); }
       catch (error) { console.warn("LDM diagnostic export failed", error); }
@@ -244,50 +235,113 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   chrome.action.setBadgeText({ tabId, text: "" });
 });
 
-chrome.downloads.onCreated.addListener((downloadItem) => {
+async function interceptBrowserDownload(downloadItem) {
   const url = downloadItem.finalUrl || downloadItem.url;
-  if (!shouldCaptureUrl(url, downloadItem.filename)) {
-    return;
+  if (!url || !/^https?:/i.test(url)) {
+    return false;
+  }
+
+  if (downloadItem.byExtensionId && downloadItem.byExtensionId === chrome.runtime.id) {
+    return false;
+  }
+
+  if (url.startsWith("data:") || url.startsWith("blob:")) {
+    return false;
   }
 
   if (wasRecentlyCaptured(url)) {
-    return;
+    return false;
   }
 
   const parsedDownloadUrl = safeParseUrl(url);
-  if (parsedDownloadUrl && /\.(googlevideo\.com|ytimg\.com)$/i.test(parsedDownloadUrl.hostname)) {
-    return;
+  if (!parsedDownloadUrl) {
+    return false;
   }
 
-  if (parsedDownloadUrl && /(^|\.)(whatsapp\.com|whatsapp\.net)$/i.test(parsedDownloadUrl.hostname)) {
-    return;
+  if (/\.(googlevideo\.com|ytimg\.com)$/i.test(parsedDownloadUrl.hostname)) {
+    return false;
+  }
+
+  if (/(^|\.)(whatsapp\.com|whatsapp\.net)$/i.test(parsedDownloadUrl.hostname)) {
+    return false;
   }
   const referrerUrl = safeParseUrl(downloadItem.referrer || "");
   if (referrerUrl && /(^|\.)(whatsapp\.com|whatsapp\.net)$/i.test(referrerUrl.hostname)) {
-    return;
+    return false;
   }
+
+  if (!shouldCaptureDownloadItem(downloadItem)) {
+    return false;
+  }
+
+  rememberCapture(url);
 
   chrome.downloads.cancel(downloadItem.id, () => {
     const lastError = chrome.runtime.lastError;
     if (lastError) {
       console.warn("Could not cancel browser download.", lastError.message);
-      return;
     }
-
     setTimeout(() => {
       chrome.downloads.erase({ id: downloadItem.id }, () => void chrome.runtime.lastError);
     }, 500);
   });
 
+  let httpHeaders = {};
+  if (chrome.cookies?.getAll) {
+    try {
+      const cookies = await chrome.cookies.getAll({ url });
+      if (cookies?.length > 0) {
+        httpHeaders.cookie = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+      }
+    } catch (e) {
+      console.warn("Could not read cookies for download.", e);
+    }
+  }
+  if (downloadItem.referrer) {
+    httpHeaders.referer = downloadItem.referrer;
+  }
+
+  const rawFilename = downloadItem.filename ? downloadItem.filename.split(/[\/\\]/).pop() : null;
+
+  if (typeof downloadItem.tabId === "number" && downloadItem.tabId >= 0) {
+    notifyTab(downloadItem.tabId, "info", `Downloading ${rawFilename || "file"} with Linux Download Manager...`);
+  }
+
   sendToNativeHost(
     {
       url,
       sourcePageUrl: downloadItem.referrer || null,
-      sourceTitle: downloadItem.filename || null
+      sourceTitle: rawFilename,
+      httpHeaders
     },
     downloadItem.byExtensionId ? undefined : downloadItem.tabId
-  );
+  ).then((res) => {
+    if (res?.ok && typeof downloadItem.tabId === "number" && downloadItem.tabId >= 0) {
+      notifyTab(downloadItem.tabId, "success", `Download started: ${rawFilename || "file"}`);
+    }
+  });
+
+  return true;
+}
+
+chrome.downloads.onCreated.addListener((downloadItem) => {
+  interceptBrowserDownload(downloadItem);
 });
+
+if (chrome.downloads?.onDeterminingFilename) {
+  chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+    interceptBrowserDownload(downloadItem)
+      .then((captured) => {
+        if (!captured) {
+          suggest();
+        }
+      })
+      .catch(() => {
+        suggest();
+      });
+    return true;
+  });
+}
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
@@ -495,6 +549,73 @@ async function enrichCaptureWithMediaCookies(payload, tabId) {
   return { ...payload, httpHeaders: headers };
 }
 
+function shouldCaptureDownloadItem(downloadItem) {
+  const url = downloadItem.finalUrl || downloadItem.url;
+  const parsedUrl = safeParseUrl(url);
+  if (!parsedUrl || !/^https?:$/i.test(parsedUrl.protocol)) {
+    return false;
+  }
+
+  if (parsedUrl.searchParams.has("download")) {
+    return true;
+  }
+
+  const urlExt = getExtension(parsedUrl.pathname);
+  const fileExt = getExtension(downloadItem.filename || "");
+
+  const webExts = new Set(["html", "htm", "php", "asp", "aspx", "jsp", "js", "css"]);
+  if (webExts.has(urlExt) || webExts.has(fileExt)) {
+    return false;
+  }
+
+  if (IMAGE_EXTENSIONS.has(urlExt) || IMAGE_EXTENSIONS.has(fileExt)) {
+    return false;
+  }
+
+  if (fileExt && (DOWNLOADABLE_EXTENSIONS.has(fileExt) || STREAMING_EXTENSIONS.has(fileExt))) {
+    return true;
+  }
+
+  if (urlExt && (DOWNLOADABLE_EXTENSIONS.has(urlExt) || STREAMING_EXTENSIONS.has(urlExt))) {
+    return true;
+  }
+
+  const mime = (downloadItem.mime || "").toLowerCase().trim();
+  if (mime) {
+    if (
+      mime.includes("zip") ||
+      mime.includes("tar") ||
+      mime.includes("gzip") ||
+      mime.includes("compressed") ||
+      mime.includes("debian") ||
+      mime.includes("rpm") ||
+      mime.includes("iso9660") ||
+      mime.includes("msdos-program") ||
+      mime.includes("x-msi") ||
+      mime.includes("x-apple-diskimage") ||
+      mime.includes("pdf") ||
+      mime.includes("epub")
+    ) {
+      return true;
+    }
+
+    if (mime.startsWith("video/") || mime.startsWith("audio/")) {
+      return true;
+    }
+
+    if (mime === "application/octet-stream" || mime === "binary/octet-stream") {
+      if (fileExt && !webExts.has(fileExt)) {
+        return true;
+      }
+      if (downloadItem.fileSize && downloadItem.fileSize > 1024 * 1024) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 function shouldCaptureUrl(rawUrl, hintName = "") {
   const parsedUrl = safeParseUrl(rawUrl);
   if (!parsedUrl || !/^https?:$/i.test(parsedUrl.protocol)) {
@@ -505,9 +626,14 @@ function shouldCaptureUrl(rawUrl, hintName = "") {
     return true;
   }
 
-  const pathname = `${parsedUrl.pathname}/${hintName}`.toLowerCase();
-  const extension = pathname.split(".").pop();
-  return DOWNLOADABLE_EXTENSIONS.has(extension) || STREAMING_EXTENSIONS.has(extension);
+  const urlExt = getExtension(parsedUrl.pathname);
+  const hintExt = getExtension(hintName);
+
+  if (hintExt && (DOWNLOADABLE_EXTENSIONS.has(hintExt) || STREAMING_EXTENSIONS.has(hintExt))) {
+    return true;
+  }
+
+  return Boolean(urlExt && (DOWNLOADABLE_EXTENSIONS.has(urlExt) || STREAMING_EXTENSIONS.has(urlExt)));
 }
 
 function safeParseUrl(rawUrl) {
@@ -614,6 +740,7 @@ function rememberMediaRequest(tabId, url, type, referrerUrl = null, requestHeade
   });
   nextCandidates.sort((left, right) => right.score - left.score || right.seenAt - left.seenAt);
   recentMediaByTab.set(tabId, nextCandidates.slice(0, MAX_MEDIA_CANDIDATES));
+  updateBadge(tabId, nextCandidates.length);
 }
 
 function getMediaCandidatesForTab(tabId) {
@@ -796,10 +923,45 @@ function canTryYtdlpPage(pageUrl) {
     && !/(^|\.)yabancidizi\.news$/i.test(parsedUrl.hostname));
 }
 
+function isSocialVideoPageUrl(rawUrl) {
+  const url = safeParseUrl(rawUrl);
+  if (!url || !/^https?:$/i.test(url.protocol)) return false;
+  const host = url.hostname.toLowerCase();
+  const path = url.pathname;
+
+  if (/(?:^|\.)(?:youtube\.com|youtu\.be)$/i.test(host)) {
+    return path.includes("/watch") || path.includes("/shorts/") || host.includes("youtu.be");
+  }
+  if (/(?:^|\.)(?:twitter\.com|x\.com)$/i.test(host)) {
+    return /\/status\/\d+/.test(path);
+  }
+  if (/(?:^|\.)(?:reddit\.com|redd\.it)$/i.test(host)) {
+    return path.includes("/comments/") || host.includes("redd.it");
+  }
+  if (/(?:^|\.)(?:facebook\.com|fb\.watch)$/i.test(host)) {
+    return path.includes("/videos/") || path.includes("/reel/") || path.includes("/watch/") || host.includes("fb.watch");
+  }
+  if (/(?:^|\.)(?:instagram\.com)$/i.test(host)) {
+    return path.includes("/p/") || path.includes("/reel/") || path.includes("/reels/");
+  }
+  if (/(?:^|\.)(?:tiktok\.com)$/i.test(host)) {
+    return path.includes("/video/") || path.includes("/@");
+  }
+  if (/(?:^|\.)(?:vimeo\.com)$/i.test(host)) {
+    return /\/\d+/.test(path);
+  }
+  if (/(?:^|\.)(?:dailymotion\.com)$/i.test(host)) {
+    return path.includes("/video/");
+  }
+  if (/(?:^|\.)(?:twitch\.tv)$/i.test(host)) {
+    return path.includes("/videos/") || path.includes("/clip/");
+  }
+
+  return false;
+}
+
 function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourceTitle) {
-  // X serves some captured video renditions without audio. Download from the
-  // post instead so yt-dlp can select and merge the complete media.
-  if (isTwitterStatusPageUrl(sourcePageUrl)) {
+  if (isSocialVideoPageUrl(sourcePageUrl)) {
     return {
       ok: true,
       capture: {
@@ -811,6 +973,25 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
         streamManifest: false
       }
     };
+  }
+
+  // If a direct media URL was provided by the player element (<video src="...">)
+  if (preferredUrl && /^https?:/i.test(preferredUrl)) {
+    const ext = getExtension(preferredUrl);
+    if (DOWNLOADABLE_EXTENSIONS.has(ext) || STREAMING_EXTENSIONS.has(ext) || /(video|audio|stream)/i.test(preferredUrl)) {
+      const isStream = ["m3u8", "mpd", "m3u"].includes(ext);
+      return {
+        ok: true,
+        capture: {
+          url: preferredUrl,
+          audioUrl: null,
+          sourcePageUrl,
+          sourceTitle,
+          streamManifest: isStream,
+          forceYtdlp: false
+        }
+      };
+    }
   }
 
   const candidates = getMediaCandidatesForTab(tabId).filter(
@@ -832,7 +1013,7 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
     }
     return {
       ok: false,
-      error: "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin."
+      error: "Video stream not captured yet. Please refresh the page and play the video, then try again."
     };
   }
 
@@ -878,7 +1059,7 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
     }
     return {
       ok: false,
-      error: "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin."
+      error: "Video stream not captured yet. Please refresh the page and play the video, then try again."
     };
   }
 

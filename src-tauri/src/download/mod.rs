@@ -20,6 +20,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc;
 
 const SEGMENT_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
+#[allow(dead_code)]
 const MAX_SEGMENTS: usize = 4;
 const STREAM_MANIFEST_CONTENT_TYPES: &[&str] = &[
     "application/vnd.apple.mpegurl",
@@ -86,6 +87,8 @@ pub struct DownloadRecord {
     pub checksum_status: Option<String>,
     pub scheduled_at: Option<String>,
     pub bandwidth_limit_kbps: Option<u64>,
+    pub speed_bytes_per_second: Option<u64>,
+    pub eta_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -431,6 +434,7 @@ impl DownloadService {
 
         on_started(actual_resume_from, total_bytes.or(total_bytes_hint), 1)?;
 
+        let mut last_progress = std::time::Instant::now();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|error| format!("failed while streaming data: {error}"))?;
             if let Some(throttle) = throttle.as_ref() {
@@ -440,8 +444,12 @@ impl DownloadService {
                 .await
                 .map_err(|error| format!("failed to write downloaded bytes: {error}"))?;
             downloaded_bytes += chunk.len() as u64;
-            on_progress(downloaded_bytes, total_bytes.or(total_bytes_hint), 1)?;
+            if last_progress.elapsed() >= std::time::Duration::from_millis(300) {
+                on_progress(downloaded_bytes, total_bytes.or(total_bytes_hint), 1)?;
+                last_progress = std::time::Instant::now();
+            }
         }
+        on_progress(downloaded_bytes, total_bytes.or(total_bytes_hint), 1)?;
 
         file.flush()
             .await
@@ -785,9 +793,34 @@ impl DownloadService {
             .spawn()
             .map_err(|error| format!("failed to start yt-dlp: {error}"))?);
 
-        let output = child
+        let mut output = child
             .wait_with_output()
             .map_err(|error| format!("failed to run yt-dlp: {error}"))?;
+
+        if !output.status.success() && needs_cookies {
+            let mut retry_cmd = clean_env_command(&ytdlp_path);
+            retry_cmd
+                .arg("--no-warnings")
+                .arg("--no-playlist")
+                .arg("-f")
+                .arg(format_spec)
+                .arg("--merge-output-format")
+                .arg("mp4")
+                .arg("-o")
+                .arg(target_path)
+                .arg("--print")
+                .arg("after_move:filepath")
+                .arg(url.as_str())
+                .stderr(Stdio::piped())
+                .stdout(Stdio::piped());
+            if let Ok(retry_child) = retry_cmd.spawn() {
+                if let Ok(retry_output) = retry_child.wait_with_output() {
+                    if retry_output.status.success() {
+                        output = retry_output;
+                    }
+                }
+            }
+        }
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -980,27 +1013,48 @@ impl DownloadService {
         }
         drop(tx);
 
-        let progress_task = {
-            let progress = progress.clone();
-            tokio::spawn(async move {
-                while let Some(bytes) = rx.recv().await {
-                    let mut p = progress.lock().await;
-                    *p += bytes;
-                }
-            })
-        };
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(350));
+        let mut completed_segments = 0;
+        let total_segments = futures.len();
+        let mut rx_closed = false;
 
-        while let Some(result) = futures.next().await {
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => return Err(error),
-                Err(error) => return Err(format!("segment task panicked: {error}")),
+        while completed_segments < total_segments {
+            tokio::select! {
+                res = rx.recv(), if !rx_closed => {
+                    match res {
+                        Some(bytes) => {
+                            let mut p = progress.lock().await;
+                            *p += bytes;
+                        }
+                        None => {
+                            rx_closed = true;
+                        }
+                    }
+                }
+                Some(result) = futures.next() => {
+                    match result {
+                        Ok(Ok(())) => {
+                            completed_segments += 1;
+                        }
+                        Ok(Err(error)) => return Err(error),
+                        Err(error) => return Err(format!("segment task panicked: {error}")),
+                    }
+                    let current = *progress.lock().await;
+                    on_progress(current, Some(total_bytes), segment_count)?;
+                }
+                _ = interval.tick() => {
+                    let current = *progress.lock().await;
+                    let _ = on_progress(current, Some(total_bytes), segment_count);
+                }
             }
-            let current = *progress.lock().await;
-            on_progress(current, Some(total_bytes), segment_count)?;
         }
 
-        progress_task.abort();
+        while let Ok(bytes) = rx.try_recv() {
+            let mut p = progress.lock().await;
+            *p += bytes;
+        }
+        let current = *progress.lock().await;
+        on_progress(current, Some(total_bytes), segment_count)?;
 
         let temp_path = self.partial_path_for(target_path);
         let mut output = fs::File::create(&temp_path)
@@ -1185,7 +1239,7 @@ fn resolve_ytdlp_source(cdn_url: &Url, source_page_url: Option<&str>) -> Option<
         return Some(cdn_url.clone());
     }
 
-    // Reddit: yt-dlp ile değil, doğrudan HLS/mp4 olarak indir
+    // Reddit: direct HLS/mp4 download instead of yt-dlp
 
     if host.ends_with(".googlevideo.com")
         || host.ends_with(".youtube.com")
@@ -1203,12 +1257,20 @@ fn derive_ytdlp_file_name(url: &Url) -> String {
         "youtube"
     } else if host.contains("x.com") || host.contains("twitter.com") {
         "twitter"
-    } else if host.contains("reddit.com") {
+    } else if host.contains("reddit.com") || host.contains("redd.it") {
         "reddit"
     } else if host.contains("facebook.com") || host.contains("fb.watch") {
         "facebook"
     } else if host.contains("instagram.com") {
         "instagram"
+    } else if host.contains("tiktok.com") {
+        "tiktok"
+    } else if host.contains("vimeo.com") {
+        "vimeo"
+    } else if host.contains("dailymotion.com") {
+        "dailymotion"
+    } else if host.contains("twitch.tv") {
+        "twitch"
     } else {
         "video"
     };
@@ -1219,12 +1281,16 @@ fn derive_ytdlp_file_name(url: &Url) -> String {
         .map(|(_, value)| value.to_string())
         .or_else(|| {
             url.path_segments()
-                .and_then(|segments| segments.last().map(String::from))
-                .filter(|s| !s.is_empty())
+                .and_then(|segments| segments.filter(|s| !s.is_empty()).last().map(String::from))
         })
         .unwrap_or_else(|| "download".to_string());
 
-    format!("{prefix}_{id}.mp4")
+    let clean_id: String = id
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    let display_id = if clean_id.is_empty() { "media" } else { &clean_id };
+    format!("{prefix}_{display_id}.mp4")
 }
 
 fn is_ytdlp_supported_cdn(url: &Url) -> bool {
@@ -1234,6 +1300,9 @@ fn is_ytdlp_supported_cdn(url: &Url) -> bool {
         || host.ends_with(".fbcdn.net")
         || host.ends_with(".cdninstagram.com")
         || host.ends_with(".twimg.com")
+        || host.ends_with(".tiktokcdn.com")
+        || host.ends_with(".vimeocdn.com")
+        || host.ends_with(".dmcdn.net")
 }
 
 fn is_ytdlp_supported_page(page_url: &str) -> bool {
@@ -1247,6 +1316,17 @@ fn is_ytdlp_supported_page(page_url: &str) -> bool {
         || dominated_by("twitter.com/")
         || dominated_by("youtube.com/")
         || dominated_by("youtu.be/")
+        || dominated_by("reddit.com/")
+        || dominated_by("redd.it/")
+        || dominated_by("tiktok.com/")
+        || dominated_by("vimeo.com/")
+        || dominated_by("dailymotion.com/")
+        || dominated_by("twitch.tv/")
+        || dominated_by("streamable.com/")
+        || dominated_by("pinterest.com/")
+        || dominated_by("bilibili.com/")
+        || dominated_by("soundcloud.com/")
+        || dominated_by("bandcamp.com/")
 }
 
 fn looks_like_stream_manifest_url(url: &Url) -> bool {

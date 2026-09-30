@@ -7,93 +7,460 @@
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <div class="app">
-        <header class="app-header">
-            <h1>Linux Download Manager</h1>
-            <div class="header-actions">
-                <button id="toggle-settings" class="btn btn-ghost">Settings</button>
+    <div class="app-layout">
+        <!-- Top Navigation Bar -->
+        <header class="topbar">
+            <div class="topbar-brand">
+                <div class="brand-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                </div>
+                <div class="brand-info">
+                    <div class="brand-title">Linux Download Manager</div>
+                    <div class="brand-subtitle">High Performance Downloader</div>
+                </div>
+            </div>
+
+            <!-- Global Live Speed & Queue Ticker -->
+            <div class="topbar-metrics">
+                <div class="metric-pill" id="global-speed-pill" title="Total current download speed">
+                    <span class="speed-pulse" id="speed-pulse"></span>
+                    <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                    </svg>
+                    <span class="metric-value" id="global-speed">0.0 KB/s</span>
+                </div>
+                <div class="metric-pill metric-pill-subtle" id="global-queue-pill" title="Active transfers and queued jobs">
+                    <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <polyline points="12 6 12 12 16 14"></polyline>
+                    </svg>
+                    <span class="metric-value" id="global-queue-status">Idle</span>
+                </div>
+            </div>
+
+            <!-- Header Actions -->
+            <div class="topbar-actions">
+                <button id="btn-new-download" class="btn btn-primary" title="New Download (Ctrl+N)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
+                    <span>New Download</span>
+                    <span class="kbd-badge">Ctrl+N</span>
+                </button>
+                <button id="btn-pause-all" class="btn btn-secondary btn-icon-text" title="Pause or resume all active downloads">
+                    <svg id="icon-pause-all" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="6" y="4" width="4" height="16"></rect>
+                        <rect x="14" y="4" width="4" height="16"></rect>
+                    </svg>
+                    <span id="label-pause-all">Pause All</span>
+                </button>
+                <button id="btn-open-settings" class="btn btn-ghost btn-icon-only" title="Settings">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                    </svg>
+                </button>
             </div>
         </header>
 
-        <section id="settings-panel" class="settings-panel" hidden>
-            <h2>Application Settings</h2>
-            <div class="settings-grid">
-                <label>Default download folder</label>
-                <div class="setting-value" id="settings-download-dir">~/Downloads</div>
-
-                <label>Maximum concurrent downloads</label>
-                <input type="number" id="settings-max-concurrent" min="1" max="10" value="3">
-
-                <label>Default bandwidth limit (KB/s)</label>
-                <input type="number" id="settings-bandwidth-limit" min="0" placeholder="0 = unlimited">
-            </div>
-            <button id="save-settings" class="btn btn-primary">Save</button>
-        </section>
-
-        <section class="download-form">
-            <h2>New Download</h2>
-            <div class="form-row">
-                <input type="text" id="url-input" placeholder="Paste a download URL..." class="input-url">
-                <button id="inspect-btn" class="btn btn-secondary">Inspect</button>
-            </div>
-
-            <div id="metadata-panel" class="metadata-panel" hidden>
-                <div class="metadata-grid">
-                    <span class="meta-label">File name:</span>
-                    <span id="meta-filename" class="meta-value">-</span>
-                    <span class="meta-label">Size:</span>
-                    <span id="meta-size" class="meta-value">-</span>
-                    <span class="meta-label">Type:</span>
-                    <span id="meta-type" class="meta-value">-</span>
-                    <span class="meta-label">Resumable:</span>
-                    <span id="meta-resumable" class="meta-value">-</span>
+        <!-- Main Body: Sidebar + Download List Area -->
+        <div class="app-body">
+            <!-- Sidebar Navigation -->
+            <aside class="sidebar">
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title">Status</div>
+                    <nav class="sidebar-nav">
+                        <button class="nav-item active" data-filter="all">
+                            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="3" y="3" width="7" height="7"></rect>
+                                <rect x="14" y="3" width="7" height="7"></rect>
+                                <rect x="14" y="14" width="7" height="7"></rect>
+                                <rect x="3" y="14" width="7" height="7"></rect>
+                            </svg>
+                            <span class="nav-label">All Downloads</span>
+                            <span class="badge" id="count-all">0</span>
+                        </button>
+                        <button class="nav-item" data-filter="in_progress">
+                            <span class="status-dot status-dot-active"></span>
+                            <span class="nav-label">Downloading</span>
+                            <span class="badge badge-active" id="count-in_progress">0</span>
+                        </button>
+                        <button class="nav-item" data-filter="queued">
+                            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <polyline points="12 6 12 12 16 14"></polyline>
+                            </svg>
+                            <span class="nav-label">Queued</span>
+                            <span class="badge" id="count-queued">0</span>
+                        </button>
+                        <button class="nav-item" data-filter="paused">
+                            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <line x1="10" y1="15" x2="10" y2="9"></line>
+                                <line x1="14" y1="15" x2="14" y2="9"></line>
+                            </svg>
+                            <span class="nav-label">Paused</span>
+                            <span class="badge" id="count-paused">0</span>
+                        </button>
+                        <button class="nav-item" data-filter="completed">
+                            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                                <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                            </svg>
+                            <span class="nav-label">Completed</span>
+                            <span class="badge badge-success" id="count-completed">0</span>
+                        </button>
+                        <button class="nav-item" data-filter="failed">
+                            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <line x1="12" y1="8" x2="12" y2="12"></line>
+                                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                            </svg>
+                            <span class="nav-label">Failed</span>
+                            <span class="badge badge-danger" id="count-failed">0</span>
+                        </button>
+                    </nav>
                 </div>
 
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>Save folder</label>
-                        <div class="input-with-button">
-                            <input type="text" id="save-dir-input" placeholder="Default folder">
-                            <button id="pick-dir-btn" class="btn btn-ghost">Choose</button>
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title">Categories</div>
+                    <nav class="sidebar-nav">
+                        <button class="nav-item" data-category="video">
+                            <svg class="nav-icon cat-icon cat-video" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polygon points="23 7 16 12 23 17 23 7"></polygon>
+                                <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+                            </svg>
+                            <span class="nav-label">Videos</span>
+                            <span class="badge" id="cat-video">0</span>
+                        </button>
+                        <button class="nav-item" data-category="audio">
+                            <svg class="nav-icon cat-icon cat-audio" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M9 18V5l12-2v13"></path>
+                                <circle cx="6" cy="18" r="3"></circle>
+                                <circle cx="18" cy="16" r="3"></circle>
+                            </svg>
+                            <span class="nav-label">Music & Audio</span>
+                            <span class="badge" id="cat-audio">0</span>
+                        </button>
+                        <button class="nav-item" data-category="archive">
+                            <svg class="nav-icon cat-icon cat-archive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 8v13H3V8"></path>
+                                <path d="M1 3h22v5H1z"></path>
+                                <line x1="10" y1="12" x2="14" y2="12"></line>
+                            </svg>
+                            <span class="nav-label">Archives & Apps</span>
+                            <span class="badge" id="cat-archive">0</span>
+                        </button>
+                        <button class="nav-item" data-category="document">
+                            <svg class="nav-icon cat-icon cat-document" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                <polyline points="14 2 14 8 20 8"></polyline>
+                                <line x1="16" y1="13" x2="8" y2="13"></line>
+                                <line x1="16" y1="17" x2="8" y2="17"></line>
+                            </svg>
+                            <span class="nav-label">Documents</span>
+                            <span class="badge" id="cat-document">0</span>
+                        </button>
+                        <button class="nav-item" data-category="image">
+                            <svg class="nav-icon cat-icon cat-image" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                                <polyline points="21 15 16 10 5 21"></polyline>
+                            </svg>
+                            <span class="nav-label">Images</span>
+                            <span class="badge" id="cat-image">0</span>
+                        </button>
+                    </nav>
+                </div>
+
+                <!-- Storage quick link at bottom of sidebar -->
+                <div class="sidebar-footer">
+                    <div class="storage-info">
+                        <div class="storage-label">Default Folder</div>
+                        <div class="storage-path" id="sidebar-download-dir" title="Click to open download folder">~/Downloads</div>
+                    </div>
+                    <button id="sidebar-open-folder-btn" class="btn btn-ghost btn-icon-only btn-sm" title="Open Download Folder">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                    </button>
+                </div>
+            </aside>
+
+            <!-- Main Content Area -->
+            <main class="content-area">
+                <!-- Toolbar: Search, Sort, Clear -->
+                <div class="content-toolbar">
+                    <div class="search-box">
+                        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <input type="text" id="search-input" placeholder="Search downloads by name or URL… (Ctrl+F)" autocomplete="off">
+                        <button id="search-clear-btn" class="search-clear" hidden title="Clear search">×</button>
+                    </div>
+
+                    <div class="toolbar-controls">
+                        <div class="sort-selector">
+                            <label for="sort-select">Sort by:</label>
+                            <select id="sort-select" class="select-dropdown">
+                                <option value="newest">Newest first</option>
+                                <option value="oldest">Oldest first</option>
+                                <option value="name">Name (A-Z)</option>
+                                <option value="size">Size (Largest)</option>
+                            </select>
+                        </div>
+                        <button id="clear-completed-btn" class="btn btn-secondary btn-sm" title="Remove all completed or failed items from the list">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="3 6 5 6 21 6"></polyline>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                            </svg>
+                            <span>Clear Finished</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Downloads List Container -->
+                <div id="downloads-container" class="downloads-container">
+                    <!-- Populated dynamically via JS -->
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- NEW DOWNLOAD MODAL -->
+    <div id="new-download-modal" class="modal-backdrop" hidden>
+        <div class="modal-window">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <div class="modal-icon-badge">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                    </div>
+                    <div>
+                        <h2 class="modal-title">New Download</h2>
+                        <div class="modal-subtitle">Paste a direct file URL, media link, or YouTube/Reddit stream</div>
+                    </div>
+                </div>
+                <button id="modal-close-btn" class="btn btn-ghost btn-icon-only" title="Close (Esc)">✕</button>
+            </div>
+
+            <div class="modal-body">
+                <!-- URL Input Group -->
+                <div class="form-group">
+                    <label for="url-input" class="form-label">Download URL</label>
+                    <div class="url-input-container">
+                        <input type="text" id="url-input" class="input-text" placeholder="https://example.com/file.zip" autofocus>
+                        <button id="paste-clipboard-btn" class="btn btn-secondary btn-sm" title="Paste from clipboard">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
+                                <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
+                            </svg>
+                            <span>Paste</span>
+                        </button>
+                        <button id="inspect-btn" class="btn btn-secondary btn-sm">Inspect</button>
+                    </div>
+                </div>
+
+                <!-- Metadata Preview Card (Revealed upon inspection or typing) -->
+                <div id="metadata-panel" class="metadata-card" hidden>
+                    <div class="metadata-header">
+                        <span class="meta-card-title">File Details</span>
+                        <span id="meta-resumable-badge" class="meta-tag">Resumable: Yes</span>
+                    </div>
+                    <div class="metadata-row">
+                        <div class="meta-field">
+                            <label class="meta-field-label">Save As (File Name)</label>
+                            <input type="text" id="custom-filename-input" class="input-text" placeholder="File name">
+                        </div>
+                    </div>
+                    <div class="metadata-grid">
+                        <div class="meta-stat">
+                            <span class="meta-stat-label">File Size</span>
+                            <span class="meta-stat-value" id="meta-size">—</span>
+                        </div>
+                        <div class="meta-stat">
+                            <span class="meta-stat-label">Content Type</span>
+                            <span class="meta-stat-value" id="meta-type">—</span>
+                        </div>
+                        <div class="meta-stat">
+                            <span class="meta-stat-label">Server Resume</span>
+                            <span class="meta-stat-value" id="meta-resumable">—</span>
                         </div>
                     </div>
                 </div>
 
-                <details class="advanced-options">
-                    <summary>Advanced options</summary>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>SHA-256 checksum</label>
-                            <input type="text" id="checksum-input" placeholder="Optional integrity check">
+                <!-- Destination Folder -->
+                <div class="form-group">
+                    <label for="save-dir-input" class="form-label">Save Folder</label>
+                    <div class="folder-picker-group">
+                        <input type="text" id="save-dir-input" class="input-text" placeholder="Default folder">
+                        <button id="pick-dir-btn" class="btn btn-secondary">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                            </svg>
+                            <span>Browse…</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Collapsible Advanced Options -->
+                <details class="advanced-accordion" id="advanced-accordion">
+                    <summary class="accordion-summary">
+                        <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="9 18 15 12 9 6"></polyline>
+                        </svg>
+                        <span>Advanced Options (Checksum, Speed limit, Schedule)</span>
+                    </summary>
+                    <div class="accordion-content">
+                        <div class="form-row">
+                            <div class="form-group flex-2">
+                                <label for="checksum-input" class="form-label">SHA-256 Checksum (Optional)</label>
+                                <input type="text" id="checksum-input" class="input-text mono" placeholder="e.g. 8a2f5c1d… for auto-verification">
+                            </div>
+                            <div class="form-group flex-1">
+                                <label for="bandwidth-input" class="form-label">Speed Limit (KB/s)</label>
+                                <input type="number" id="bandwidth-input" class="input-text" min="0" placeholder="0 = unlimited">
+                            </div>
                         </div>
                         <div class="form-group">
-                            <label>Bandwidth limit (KB/s)</label>
-                            <input type="number" id="bandwidth-input" min="0" placeholder="0 = unlimited">
-                        </div>
-                        <div class="form-group">
-                            <label>Schedule</label>
-                            <input type="datetime-local" id="schedule-input">
+                            <label for="schedule-input" class="form-label">Schedule Start</label>
+                            <input type="datetime-local" id="schedule-input" class="input-text">
                         </div>
                     </div>
                 </details>
-
-                <button id="start-btn" class="btn btn-primary btn-large">Start download</button>
             </div>
-        </section>
 
-        <section class="download-list">
-            <div class="list-header">
-                <h2>Downloads</h2>
-                <div class="list-header-right">
-                    <div id="queue-summary" class="queue-summary"></div>
-                    <button id="clear-completed-btn" class="btn btn-small btn-ghost">Clear all</button>
+            <div class="modal-footer">
+                <button id="modal-cancel-btn" class="btn btn-ghost">Cancel</button>
+                <button id="start-btn" class="btn btn-primary btn-cta">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    <span>Start Download</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- SETTINGS MODAL -->
+    <div id="settings-modal" class="modal-backdrop" hidden>
+        <div class="modal-window">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <div class="modal-icon-badge">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="3"></circle>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                        </svg>
+                    </div>
+                    <div>
+                        <h2 class="modal-title">Settings</h2>
+                        <div class="modal-subtitle">Configure application defaults and browser integration</div>
+                    </div>
+                </div>
+                <button id="settings-close-btn" class="btn btn-ghost btn-icon-only">✕</button>
+            </div>
+
+            <div class="modal-body">
+                <div class="settings-card">
+                    <div class="settings-card-title">General Download Settings</div>
+
+                    <div class="setting-item">
+                        <div class="setting-text">
+                            <div class="setting-name">Default Download Folder</div>
+                            <div class="setting-desc">Files will be saved here unless specified otherwise</div>
+                        </div>
+                        <div class="folder-picker-group">
+                            <span class="setting-path mono" id="settings-download-dir">~/Downloads</span>
+                            <button id="settings-browse-btn" class="btn btn-secondary btn-sm">Browse…</button>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div class="setting-text">
+                            <div class="setting-name">Max Concurrent Downloads</div>
+                            <div class="setting-desc">Number of files downloaded at the same time</div>
+                        </div>
+                        <div class="stepper-input">
+                            <input type="range" id="settings-max-concurrent" min="1" max="10" value="3">
+                            <span class="range-value" id="concurrent-display">3</span>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div class="setting-text">
+                            <div class="setting-name">Default Bandwidth Limit</div>
+                            <div class="setting-desc">Global speed cap per download in KB/s (0 = unlimited)</div>
+                        </div>
+                        <input type="number" id="settings-bandwidth-limit" class="input-text input-compact" min="0" placeholder="0">
+                    </div>
+                </div>
+
+                <div class="settings-card">
+                    <div class="settings-card-title">Browser Extension</div>
+                    <div class="setting-item">
+                        <div class="setting-text">
+                            <div class="setting-name">Chromium Extension Folder</div>
+                            <div class="setting-desc">Load unpacked from Chrome/Brave <code>chrome://extensions</code></div>
+                        </div>
+                        <div class="btn-group">
+                            <button id="btn-open-ext-folder" class="btn btn-secondary btn-sm">Open Folder</button>
+                        </div>
+                    </div>
                 </div>
             </div>
-            <div id="downloads-container" class="downloads-container">
-                <p class="empty-message">No downloads yet.</p>
+
+            <div class="modal-footer">
+                <button id="settings-cancel-btn" class="btn btn-ghost">Cancel</button>
+                <button id="save-settings" class="btn btn-primary">Save Settings</button>
             </div>
-        </section>
+        </div>
     </div>
+
+    <!-- DELETE CONFIRMATION MODAL -->
+    <div id="delete-modal" class="modal-backdrop" hidden>
+        <div class="modal-window modal-window-sm">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <div class="modal-icon-badge badge-danger">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                        </svg>
+                    </div>
+                    <div>
+                        <h2 class="modal-title">Remove Download</h2>
+                        <div class="modal-subtitle">Choose whether to keep or remove the file from your computer</div>
+                    </div>
+                </div>
+                <button id="delete-modal-close-btn" class="btn btn-ghost btn-icon-only">✕</button>
+            </div>
+            <div class="modal-body">
+                <p class="delete-prompt">Remove <strong id="delete-item-name">item</strong> from the downloads list?</p>
+                <label class="checkbox-label">
+                    <input type="checkbox" id="delete-file-checkbox">
+                    <span>Also delete the downloaded file from disk</span>
+                </label>
+            </div>
+            <div class="modal-footer">
+                <button id="delete-cancel-btn" class="btn btn-ghost">Cancel</button>
+                <button id="delete-confirm-btn" class="btn btn-danger">Remove</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- TOAST NOTIFICATION CONTAINER -->
+    <div id="toast-container" class="toast-container"></div>
 
     <script src="main.js"></script>
 </body>

@@ -127,6 +127,8 @@ impl Storage {
                         checksum_status: row.get("checksum_status")?,
                         scheduled_at: row.get("scheduled_at")?,
                         bandwidth_limit_kbps: row.get::<_, Option<i64>>("bandwidth_limit_kbps")?.map(|v| v as u64),
+                        speed_bytes_per_second: None,
+                        eta_seconds: None,
                     })
                 },
             )
@@ -160,6 +162,8 @@ impl Storage {
                     checksum_status: row.get("checksum_status")?,
                     scheduled_at: row.get("scheduled_at")?,
                     bandwidth_limit_kbps: row.get::<_, Option<i64>>("bandwidth_limit_kbps")?.map(|v| v as u64),
+                    speed_bytes_per_second: None,
+                    eta_seconds: None,
                 })
             })
             .map_err(|error| format!("failed to list downloads: {error}"))?
@@ -205,6 +209,14 @@ impl Storage {
             )
             .map_err(|error| format!("failed to clear completed downloads: {error}"))?;
         Ok(count as u64)
+    }
+
+    pub fn delete_download(&self, id: i64) -> Result<(), String> {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .execute("DELETE FROM downloads WHERE id = ?1", params![id])
+            .map_err(|error| format!("failed to delete download: {error}"))?;
+        Ok(())
     }
 
     pub fn set_checksum_verification(
@@ -253,6 +265,8 @@ impl Storage {
                     checksum_status: row.get("checksum_status")?,
                     scheduled_at: row.get("scheduled_at")?,
                     bandwidth_limit_kbps: row.get::<_, Option<i64>>("bandwidth_limit_kbps")?.map(|v| v as u64),
+                    speed_bytes_per_second: None,
+                    eta_seconds: None,
                 })
             })
             .map_err(|error| format!("failed to list resumable downloads: {error}"))?
