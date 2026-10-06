@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Linux Download Manager</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="main-page">
+  <div class="app-shell">
+    <header class="titlebar">
+      <div class="brand"><span class="brand-mark">⇩</span><strong>Linux Download Manager</strong></div>
+      <label class="search"><span>⌕</span><input id="search-input" type="search" placeholder="Search downloads" aria-label="Search downloads"></label>
+    </header>
+
+    <aside class="sidebar" aria-label="Download categories">
+      <button class="category active" data-filter="all"><span>▰</span><strong>All</strong><em id="count-all">0</em></button>
+      <div class="category-group" id="category-list">
+        <button class="category" data-filter="image"><span>▧</span>Images</button>
+        <button class="category" data-filter="music"><span>♫</span>Music</button>
+        <button class="category" data-filter="video"><span>▰</span>Videos</button>
+        <button class="category" data-filter="apps"><span>✣</span>Applications</button>
+        <button class="category" data-filter="document"><span>▤</span>Documents</button>
+        <button class="category" data-filter="compressed"><span>▥</span>Archives</button>
+        <button class="category" data-filter="iso"><span>◉</span>ISO</button>
+        <button class="category" data-filter="other"><span>?</span>Other</button>
+      </div>
+      <div class="sidebar-divider"></div>
+      <button class="category" data-filter="finished"><span>✓</span>Finished</button>
+      <button class="category" data-filter="unfinished"><span>◷</span>Unfinished</button>
+    </aside>
+
+    <main class="workspace">
+      <nav class="toolbar" aria-label="Download actions">
+        <button id="add-url" class="tool primary"><span>↗</span>Add URL</button>
+        <span class="tool-separator"></span>
+        <button id="start-queue" class="tool"><span>▶</span>Start queue</button>
+        <button id="stop-queue" class="tool"><span>■</span>Stop queue</button>
+        <button id="stop-all" class="tool"><span>□</span>Stop all</button>
+        <span class="tool-separator"></span>
+        <button id="open-queues" class="tool"><span>▣</span>Open unfinished</button>
+        <button id="toggle-settings" class="tool"><span>⚙</span>Settings</button>
+      </nav>
+
+      <section id="settings-panel" class="settings-panel" hidden aria-labelledby="settings-heading">
+        <div><h2 id="settings-heading">Application settings</h2><p>Defaults used for new downloads.</p></div>
+        <label>Concurrent downloads<input id="settings-max-concurrent" type="number" min="1" max="10"></label>
+        <label>Bandwidth limit (KB/s)<input id="settings-bandwidth-limit" type="number" min="0" placeholder="Unlimited"></label>
+        <button id="save-settings" class="button primary">Save settings</button>
+      </section>
+
+      <section class="download-surface" aria-labelledby="downloads-heading">
+        <div class="table-caption"><div><h1 id="downloads-heading">Downloads</h1><p id="view-description">All files</p></div><button id="clear-completed" class="button quiet">Clear finished</button></div>
+        <div id="notice" class="notice" hidden role="status"></div>
+        <div class="download-table" role="table" aria-label="Downloads">
+          <div class="download-row table-head" role="row">
+            <span></span><span>Name</span><span>Size</span><span>Status</span><span>Speed</span><span>Time left</span><span>Actions</span>
+          </div>
+          <div id="download-rows" class="table-body"></div>
+        </div>
+        <div id="empty-state" class="empty-state" hidden><span>⇩</span><h2>No downloads here</h2><p>Add a URL or choose another category.</p><button class="button primary" data-open-add>Add download</button></div>
+      </section>
+    </main>
+
+    <footer class="statusbar"><span id="selection-summary">0 downloads</span><span id="queue-summary">Idle</span></footer>
+  </div>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
