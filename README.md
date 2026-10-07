@@ -1,267 +1,227 @@
-# Linux Download Manager — IDM alternative for Linux
+<p align="center">
+  <img src="src-tauri/icons/icon.png" width="96" alt="Linux Download Manager icon">
+</p>
+
+<h1 align="center">Linux Download Manager</h1>
 
 <p align="center">
-  <img src="src-tauri/icons/icon.png" width="128" alt="Linux Download Manager icon">
+  A download manager for Linux with browser integration, video downloads,<br>
+  live progress and an automatically organized download library.
 </p>
 
 <p align="center">
-  <strong>Fast, IDM-inspired download manager for Arch, Ubuntu, Fedora. Built with Rust + Tauri. YouTube, Twitter/X, Reddit, TikTok support via yt-dlp.</strong>
-</p>
-
-<p align="center">
-  <a href="#installation"><b>Install from source</b></a>
-  &nbsp;·&nbsp;
+  <a href="#installation">Installation</a> ·
+  <a href="#browser-setup">Browser setup</a> ·
+  <a href="#where-your-downloads-go">Download folders</a> ·
+  <a href="#updating">Updating</a> ·
   <a href="#troubleshooting">Troubleshooting</a>
 </p>
 
-<p align="center">
-  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
-  <img alt="Platform: Linux" src="https://img.shields.io/badge/platform-Linux-1f6feb.svg">
-  <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-orange.svg">
-</p>
+![Linux Download Manager — download library and settings](docs/images/download-manager.png)
 
-![Linux Download Manager interface with download categories and settings](docs/images/download-manager.png)
+## What you can do
 
----
+- Download files by pasting a URL or sending a download from your browser.
+- Capture videos from YouTube, Twitter/X and Reddit using the browser integration. Other supported pages use yt-dlp; availability depends on the website and access requirements.
+- See progress, transfer speed and estimated time remaining for each download.
+- Filter by status or file type, search by name, and pause or resume eligible selections together.
+- Open a file's folder, inspect download details, or clear history without deleting downloaded files.
+- Configure concurrent downloads, desktop notifications and a default speed limit. New downloads also support scheduling and optional SHA-256 verification.
+- Keep the app in the system tray while downloads run.
 
-## What is this?
-
-A lightweight, fast download manager for **Linux** — think **IDM (Internet Download Manager) alternative** for Arch, Ubuntu, Fedora. Integrates directly into Chromium-based browsers (Chrome, Brave, Edge, Vivaldi) through a native messaging bridge and an extension, and lets you download videos from YouTube, Twitter/X, Reddit, TikTok and ~1000 more sites through `yt-dlp` with a single click.
-
-**Why this exists:** Linux never got an official IDM port, and most download-manager alternatives are either abandoned, require Wine, or don't integrate with the browser. This one does — a Rust binary + a Chromium extension + a Tauri GUI, installed for the current user from source.
-
-## Features
-
-### Video Download Support
-| Platform | Quality Picker | Auto Audio | Download Button |
-|----------|:---:|:---:|:---:|
-| **YouTube** | Yes (360p-4K) | Yes | Player overlay |
-| **Twitter/X** | Yes | Yes | Inline on tweets |
-| **Reddit** | - | Yes | Above video posts |
-
-### Core Features
-- **Multi-segment downloads** - Up to 4 parallel segments for faster downloads
-- **Pause / Resume / Cancel** - Full download control
-- **Bandwidth throttling** - Per-download and global speed limits
-- **Scheduled downloads** - Set a time, download starts automatically
-- **SHA-256 verification** - Optional checksum validation
-- **Queue management** - Configurable concurrent download limit (1-10)
-- **Download history** - SQLite-backed, persistent across restarts
-
-### Desktop Integration
-- **System tray** - Runs in background, click to show/hide
-- **Close to tray** - Window close minimizes to tray instead of quitting
-- **Desktop notifications** - Download complete/failed alerts
-- **Browser integration** - Chromium extension auto-captures downloads
-- **Generic video capture** - Detects direct video, HLS and DASH streams on other websites and falls back to `yt-dlp` for supported pages
-
-### Browser Extension
-- **Inline download buttons** on YouTube, Twitter, Reddit videos
-- **Quality picker** - Choose resolution before downloading
-- **Auto-intercept** - Captures browser downloads from supported sites
-- **Media detection** - Detects video/audio streams on any page
-
-## Screenshots
-
-### Main Window
-Dark-themed UI with download list, progress bars, speed/ETA indicators.
-
-### Browser Integration
-LDM button appears directly on video players - one click to download.
+Resume support depends on the server and download method. Video and audio may be downloaded separately and combined with FFmpeg.
 
 ## Installation
 
-### System Requirements
-- **OS**: Linux (x86_64)
-- **Browser**: Google Chrome, Chromium, Brave, Edge, or Vivaldi
-- **ffmpeg**: Required for HLS/DASH streams
-  ```bash
-  # Arch Linux / CachyOS
-  sudo pacman -S ffmpeg
+### Install from source
 
-  # Ubuntu/Debian
-  sudo apt install ffmpeg
-
-  # Fedora
-  sudo dnf install ffmpeg    # RPM Fusion, or use Fedora's ffmpeg-free
-  ```
-
-### Install from Source
+The installer supports dependency setup through `pacman`, `apt` or `dnf` on Arch/CachyOS, Debian/Ubuntu and Fedora. It checks the Rust toolchain and required GTK3/WebKitGTK 4.1 libraries, builds the application, and installs it for your user.
 
 ```bash
-# Clone
 git clone https://github.com/ekremx25/linux-download-manager.git
 cd linux-download-manager
-
-# Install for the current user (Fedora, Arch, CachyOS, Debian/Ubuntu)
 ./install.sh
 ```
 
-The installer checks Rust and Tauri's WebKitGTK build libraries, installs missing packages with `dnf`, `pacman`, or `apt` using `sudo`, builds the app, and installs the browser bridge. On Fedora, `ffmpeg-free` is used if RPM Fusion's `ffmpeg` package is unavailable. On Arch and CachyOS, the same `pacman` packages are used. Loading the unpacked extension in the browser remains a one-time manual step.
+Run the installer **as your normal user**, without `sudo`. It requests `sudo` when system dependencies need installing. Video downloads require yt-dlp and FFmpeg; the installer also handles the JavaScript runtime used by yt-dlp.
 
-To load the browser extension, open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select `~/Documents/Linux Download Manager Extension/`.
-
-## How It Works
-
-```
-Browser Extension  →  Native Host  →  App (Rust/Tauri)
-     (JS)              (stdin/stdout)      ↓
-                                      yt-dlp / ffmpeg / HTTP
-                                           ↓
-                                      ~/Downloads/
-```
-
-1. **Browser extension** detects video streams and adds download buttons
-2. When clicked, sends URL + page info to the **native messaging host**
-3. Native host writes request to **inbox directory**
-4. **App** polls inbox, queues download, uses **yt-dlp** (for social media) or **direct HTTP** (for regular files)
-5. Downloads with progress tracking, speed calculation, ETA
-
-## Tech Stack
-
-| Component | Technology |
-|-----------|-----------|
-| Backend | Rust |
-| Desktop Framework | Tauri 2 |
-| Database | SQLite (rusqlite) |
-| HTTP Client | reqwest (async streaming) |
-| Video Download | yt-dlp + ffmpeg |
-| Browser Extension | Manifest V3 (Chromium) |
-| Frontend | Vanilla HTML/CSS/JS |
-| Packaging | Source installer |
-
-## Project Structure
-
-```
-├── browser/chromium/        # Browser extension
-│   ├── manifest.json
-│   ├── service-worker.js    # Background script
-│   ├── content-script.js    # Page injection (buttons, overlays)
-│   └── content-style.css
-├── src-tauri/
-│   ├── src/
-│   │   ├── app.rs           # App state, queue management
-│   │   ├── download/mod.rs  # Download engine (HTTP, HLS, yt-dlp)
-│   │   ├── commands.rs      # Tauri IPC commands
-│   │   ├── browser.rs       # Native messaging inbox
-│   │   ├── jobs.rs          # Job queue processing
-│   │   ├── storage/mod.rs   # SQLite persistence
-│   │   ├── platform.rs      # Linux paths, first-run setup
-│   │   └── lib.rs           # Tray menu, window management
-│   └── tauri.conf.json
-└── ui/                      # Frontend
-    ├── index.html
-    ├── main.js
-    └── styles.css
-```
-
-## Configuration
-
-Settings are accessible from the app UI:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Download directory | `~/Downloads` | Where files are saved |
-| Max concurrent downloads | 3 | Parallel download limit |
-| Bandwidth limit | Unlimited | Global speed cap (KB/s) |
-
-## License
-
-MIT
-
-## Credits
-
-Built with [Tauri](https://tauri.app/), [yt-dlp](https://github.com/yt-dlp/yt-dlp), and [ffmpeg](https://ffmpeg.org/).
-
-## Download progress and performance
-
-Video downloads now read yt-dlp's live, structured progress instead of waiting
-for the process to finish. The list and Details window show download speed and
-estimated time left. Video and audio may be fetched separately: each estimate
-refers to the current transfer, not extraction or the final merge. Unknown totals
-and live streams show no invented ETA.
-
-Progress events and SQLite checkpoints are limited to one every 400 ms, with
-completion/error status still recorded immediately. The browser extension
-coalesces bursts of page mutations into a single pending media scan. Progress
-bars update without continuous width animation, and hidden windows skip periodic
-refreshes. These changes reduce avoidable work; yt-dlp's site extraction and
-normal networking/merging still require CPU.
-
-Verification (from the repository root):
+After installation, open **Linux Download Manager** from your applications menu, or run:
 
 ```bash
-cargo test --workspace
-node scripts/test-progress-ui.cjs
-# Optional integration test: installed yt-dlp, only a localhost fixture
-cargo test --workspace real_ytdlp_reports_live_speed_and_eta -- --ignored
-cargo build --release --locked -p linux-download-manager-custom --bin linux-download-manager-custom
+~/.local/bin/linux-download-manager
 ```
 
-After replacing the installed extension's files, reload the extension in the
-browser's Extensions page and refresh the video page to activate the change.
+Complete the browser setup below to enable download buttons on video pages.
 
-## English interface and installer package
+### Install from a prepared package
 
-The download center shows active and completed downloads. Each file row shows
-its transfer speed and estimated time remaining. Filter by status or file type, select files to
-pause or resume together, and use the context menu for details or Show in folder.
-Removing history preserves downloaded files. Speed and time remaining stay
-visible in narrow windows. In the Add download window, **Start download** checks
-the link automatically; the separate check button is optional.
+If you have a `LinuxDownloadManager-<version>-linux-x86_64.tar.gz` installer archive:
 
-Install or reinstall the current source:
+1. Extract it to a folder.
+2. Open **Install.desktop** and trust the launcher if your desktop asks.
+3. Alternatively, open a terminal in the extracted folder and run:
 
-```bash
-./install.sh --check
-./install.sh
-```
+   ```bash
+   bash ./install.sh --prebuilt
+   ```
 
-Update a clean Git checkout with a configured tracking branch:
+The prebuilt package does not require Rust. It still needs compatible GTK3, WebKitGTK 4.1 and system libraries. A binary built with a newer glibc may not run on older distributions; use the source installation in that case.
 
-```bash
-./install.sh --update
-```
-
-The updater creates a backup Git tag first and stops if there are local changes.
-It only performs a fast-forward update; commit local changes before using it.
-`--no-deps` skips system package installation and tool downloads. `--skip-build`
-installs existing binaries without compiling source changes.
-
-Build the separate installer package:
+To create this archive from the repository:
 
 ```bash
 ./scripts/build-installer.sh
 ```
 
-Extract `dist/LinuxDownloadManager-0.2.0-linux-x86_64.tar.gz` and launch
-**Install.desktop**. Your desktop may ask you to trust the launcher. Alternatively,
-run `bash ./install.sh --prebuilt` inside the extracted folder. No Rust compiler
-is needed; GTK3, WebKitGTK 4.1 and compatible system libraries are required.
-Binaries built on this machine may not run on older glibc versions; install from
-source on those distributions.
+The archive and its SHA-256 checksum are written to `dist/`. Building a package locally does not publish a GitHub release.
 
-Installation backs up existing application and extension files under `backups/`
-in the application data directory. Uninstallation preserves history, downloads,
-backups and shared yt-dlp settings. Reload the browser extension after updating.
-Installer tests use isolated directories without touching the real user profile:
+## Browser setup
 
-```bash
-python3 scripts/test-installer.py
-node scripts/test-progress-ui.cjs
+The extension supports Chromium-based browsers such as Chrome, Chromium, Brave, Edge and Vivaldi.
+
+1. Open your browser's **Extensions** page, for example `chrome://extensions` or `edge://extensions`.
+2. Turn on **Developer mode**.
+3. Select **Load unpacked**.
+4. Choose this folder:
+
+   ```text
+   ~/Documents/Linux Download Manager Extension/
+   ```
+
+5. Open or refresh the video page and use its **LDM** download button.
+
+Keep that extension folder in place: the browser loads it from there. After an update, reload the extension from the Extensions page and refresh existing video tabs.
+
+## Where your downloads go
+
+**The application creates an `LDM` folder inside your system's Downloads directory when it starts.** Files are placed into subfolders according to their file extension.
+
+With the usual Linux download directory, the library looks like this:
+
+```text
+~/Downloads/LDM/
+├── Videos/          # MP4, MKV, WebM, MOV…
+├── Music/           # MP3, FLAC, WAV, AAC…
+├── Images/          # JPG, PNG, WebP, SVG…
+├── Documents/       # PDF, TXT, office documents…
+├── Applications/    # AppImage, DEB, RPM, APK…
+├── Archives/        # ZIP, RAR, 7Z, TAR…
+├── ISO/             # ISO and IMG disk images
+└── Other/           # Unrecognized file types
 ```
 
-## Reduced CPU overhead
+For example, a video named `example.mp4` is normally saved to:
 
-Progress notifications and database snapshots are limited to once per second;
-completion and failure states are still recorded immediately. Hidden app windows
-cache live progress without repainting and refresh when shown again. The detail
-window checks segment information every five seconds while live speed and ETA
-continue to arrive through events.
+```text
+~/Downloads/LDM/Videos/example.mp4
+```
 
-The browser extension skips background-tab scans, coalesces repeated page
-changes, and checks idle pages every five seconds. On returning to a tab it
-refreshes media discovery. Download controls may take about a second to appear
-after a page change. Reload the extension and refresh video pages after updating.
-These changes reduce bookkeeping; network encryption, video extraction and
-audio/video merging still require CPU. No transfer speed cap is introduced.
+The app respects `XDG_DOWNLOAD_DIR` in `~/.config/user-dirs.dirs`, so the base directory may have a different name or location on your system. If no valid setting is found, it uses `~/Downloads`.
+
+**Choosing a custom Save folder changes the base directory.** The app still creates `LDM/<category>` inside it. For example, choosing `/mnt/media` saves videos under `/mnt/media/LDM/Videos/`. Select the base folder, rather than an existing `LDM/Videos` subfolder, to avoid nested library folders.
+
+Use **Show in folder** on a download to find its exact location. Sidebar categories filter your download history; they do not move existing files. **Clear completed** removes history entries only, leaving the downloaded files on disk.
+
+## Everyday use
+
+1. Click **Add URL**, paste a link, and optionally choose a Save folder or file name.
+2. Click **Start download**. The app checks the link automatically; **Check link** is also available separately.
+3. Watch **Speed** and **Time left** in the download row. Double-click the row for details.
+4. Select several files to pause or resume them together. Use **Settings** to adjust concurrency, the default speed limit or notifications.
+
+The default concurrency is **3 downloads**, the default speed limit is **unlimited**, and desktop notifications are enabled by default. Closing the window hides it to the tray; it does not quit the application.
+
+### Progress and CPU usage
+
+Speed and ETA refer to the current transfer. For video downloads, extraction, separate audio/video transfers and final merging are different stages; the remaining-time value is not a promise of total completion time. Unknown sizes or durations display a dash.
+
+Progress notifications and database snapshots are limited to once per second. Hidden app windows avoid live repainting, and the extension skips background-tab scans. These measures reduce unnecessary work without imposing a transfer speed cap. Brief CPU spikes can still occur when yt-dlp starts, extracts video information, or FFmpeg combines streams.
+
+## Updating
+
+From a clean source checkout with a configured tracking branch:
+
+```bash
+cd linux-download-manager
+./install.sh --update
+```
+
+The updater creates a backup Git tag, fetches the tracking branch, and accepts only a fast-forward update. It stops if you have local changes or the branches have diverged. It does not discard changes or force-push.
+
+To reinstall your current local source without fetching:
+
+```bash
+./install.sh
+```
+
+For a prepared package, extract the newer archive and run its installer again. Existing application and extension files are backed up before replacement. Restart the app after active downloads finish, then reload the extension and refresh video tabs.
+
+Useful installer options:
+
+| Option | Purpose |
+| --- | --- |
+| `--check` | Inspect the installation plan without changing files. |
+| `--no-deps` | Skip dependency installation and tool downloads. |
+| `--skip-build` | Install binaries already present in `target/release/`. |
+| `--prebuilt` | Install binaries included in a prepared installer package. |
+
+## Installed files and removal
+
+Default locations:
+
+| Item | Location |
+| --- | --- |
+| Application | `~/.local/bin/linux-download-manager` |
+| App data and download history | `~/.local/share/linux-download-manager-custom/` |
+| Installation backups | `~/.local/share/linux-download-manager-custom/backups/` |
+| Browser extension | `~/Documents/Linux Download Manager Extension/` |
+| Download library | Your system Downloads directory, under `LDM/` |
+
+Application data follows `XDG_DATA_HOME` when set. Downloaded files and app data are separate.
+
+To uninstall from the repository or an extracted installer package:
+
+```bash
+./uninstall.sh
+```
+
+A copy of the uninstaller is also installed in the application data directory. Uninstallation preserves downloaded files, download history, installation backups and shared yt-dlp settings. Remove the unloaded extension entry from your browser's Extensions page afterward.
+
+## Troubleshooting
+
+| Problem | What to check |
+| --- | --- |
+| Cannot find a downloaded video | Use **Show in folder**, or check your Downloads directory under `LDM/Videos/`. |
+| No LDM button or browser connection | Confirm the unpacked extension is loaded, reload it, and refresh the video page. Play the video so its stream can be detected. |
+| A video download fails | Inspect the error in the download row or Details window. Verify yt-dlp and FFmpeg are available; website changes and access restrictions can affect downloads. |
+| Speed or ETA is a dash | The transfer may not have started, or its size/rate may be unknown. Extraction and merging may not have a meaningful ETA. |
+| The prebuilt app reports missing libraries | Use the source installer to build against your distribution's libraries. |
+| An update stops on local changes | Commit or back up your edits before updating. The updater intentionally leaves them intact. |
+| Changes do not appear after installation | Fully quit and reopen the app; reload the browser extension and refresh existing tabs. |
+
+## Development
+
+Built with Rust, Tauri 2, SQLite, reqwest and plain HTML/CSS/JavaScript. The Chromium extension uses Manifest V3; yt-dlp and FFmpeg handle supported video workflows.
+
+```bash
+# Build both the application and native browser bridge
+CARGO_BUILD_JOBS=1 cargo build --release --locked --bins
+
+# Backend and regression tests
+cargo test --workspace
+node scripts/test-progress-ui.cjs
+python3 scripts/test-installer.py
+
+# Optional: requires installed yt-dlp; uses a localhost fixture
+cargo test --workspace real_ytdlp_reports_live_speed_and_eta -- --ignored
+```
+
+| Directory | Contents |
+| --- | --- |
+| `src-tauri/src/` | Application, download engine, category routing and storage |
+| `ui/` | Main window, Add URL and download details |
+| `browser/chromium/` | Browser extension and media capture |
+| `scripts/` | Installer packaging and regression checks |
+| `docs/images/` | README screenshot |
+
+Built with [Tauri](https://tauri.app/), [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [FFmpeg](https://ffmpeg.org/).
