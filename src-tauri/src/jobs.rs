@@ -59,7 +59,9 @@ pub async fn queue_download_request(
         request.source_title.as_deref(),
         &metadata.suggested_file_name,
     );
-    let file_name = request.file_name.as_deref()
+    let file_name = request
+        .file_name
+        .as_deref()
         .filter(|name| !name.trim().is_empty())
         .map(|name| library::sanitize_file_name(name, "download.bin"))
         .unwrap_or(file_name);
@@ -86,10 +88,28 @@ pub async fn queue_download_request(
         category: category.to_string(),
     })?;
 
+    let job = QueuedDownload {
+        id: created.id,
+        url: request.url,
+        fallback_urls: request.fallback_urls,
+        audio_url: request.audio_url,
+        source_page_url: request.source_page_url,
+        http_headers: request.http_headers,
+        format: request.format,
+        force_ytdlp: request.force_ytdlp,
+        stream_manifest: request.stream_manifest,
+        target_path,
+        resumable_hint: metadata.resumable,
+        total_bytes_hint: metadata.content_length,
+        expected_checksum,
+        scheduled_at,
+        bandwidth_limit_kbps,
+    };
+    state.storage.save_resume_job(&job)?;
     // Held jobs are persisted as paused so the scheduler and restart cannot start them.
     let initial_status = if request.enqueue_only {
         "paused"
-    } else if scheduled_at.is_some() {
+    } else if job.scheduled_at.is_some() {
         "scheduled"
     } else {
         "queued"
@@ -110,26 +130,7 @@ pub async fn queue_download_request(
     if request.enqueue_only {
         return state.storage.get_download(created.id);
     }
-    state.enqueue_download(
-        app_handle,
-        QueuedDownload {
-            id: created.id,
-            url: request.url,
-            fallback_urls: request.fallback_urls,
-            audio_url: request.audio_url,
-            source_page_url: request.source_page_url,
-            http_headers: request.http_headers,
-            format: request.format,
-            force_ytdlp: request.force_ytdlp,
-            stream_manifest: request.stream_manifest,
-            target_path,
-            resumable_hint: metadata.resumable,
-            total_bytes_hint: metadata.content_length,
-            expected_checksum,
-            scheduled_at,
-            bandwidth_limit_kbps,
-        },
-    )?;
+    state.enqueue_download(app_handle, job)?;
 
     state.storage.get_download(created.id)
 }

@@ -151,6 +151,7 @@ pub fn run() {
             commands::cancel_download,
             commands::clear_completed,
             commands::clear_download,
+            commands::delete_download_files,
             commands::system_status,
             commands::show_add_download_window,
             commands::show_download_detail_window,

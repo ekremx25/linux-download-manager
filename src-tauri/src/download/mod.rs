@@ -985,36 +985,37 @@ impl DownloadService {
         Ok((downloaded_bytes, Some(downloaded_bytes), 1))
     }
 
+    pub async fn delete_download_files(&self, target_path: &Path) -> Result<(), String> {
+        match fs::remove_file(target_path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Could not delete downloaded file: {error}")),
+        }
+        self.remove_temp_artifacts(target_path).await
+    }
+
     pub async fn remove_temp_artifacts(&self, target_path: &Path) -> Result<(), String> {
-        let cache = hls::cache_path(target_path);
-        if fs::try_exists(&cache).await.unwrap_or(false) {
-            let _ = fs::remove_dir_all(cache).await;
-        }
-        let partial_path = self.partial_path_for(target_path);
-        if fs::try_exists(&partial_path).await.unwrap_or(false) {
-            let _ = fs::remove_file(&partial_path).await;
-        }
-
-        let ytdlp_temp = target_path.with_extension("ytdlp.mp4");
-        if fs::try_exists(&ytdlp_temp).await.unwrap_or(false) {
-            let _ = fs::remove_file(&ytdlp_temp).await;
-        }
-
-        if let Some(manifest) = self.load_segment_manifest(target_path).await? {
-            for segment in manifest.segments {
-                let segment_path = self.segment_path_for(target_path, segment.index);
-                if fs::try_exists(&segment_path).await.unwrap_or(false) {
-                    let _ = fs::remove_file(segment_path).await;
-                }
+        async fn remove_file(path: &Path) -> Result<(), String> {
+            match fs::remove_file(path).await {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(format!("Could not remove temporary file: {e}")),
             }
         }
-
-        let manifest_path = self.manifest_path_for(target_path);
-        if fs::try_exists(&manifest_path).await.unwrap_or(false) {
-            let _ = fs::remove_file(manifest_path).await;
+        let cache = hls::cache_path(target_path);
+        match fs::remove_dir_all(&cache).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Could not remove HLS cache: {e}")),
         }
-
-        Ok(())
+        remove_file(&self.partial_path_for(target_path)).await?;
+        remove_file(&target_path.with_extension("ytdlp.mp4")).await?;
+        if let Some(manifest) = self.load_segment_manifest(target_path).await? {
+            for segment in manifest.segments {
+                remove_file(&self.segment_path_for(target_path, segment.index)).await?;
+            }
+        }
+        remove_file(&self.manifest_path_for(target_path)).await
     }
 
     pub async fn compute_sha256(&self, path: &Path) -> Result<String, String> {
@@ -2120,6 +2121,33 @@ mod segment_tests {
             .await;
         assert_eq!(clamped, first_size);
         assert!(clamped_complete);
+    }
+
+    #[tokio::test]
+    async fn explicit_file_deletion_removes_only_its_output_and_temporary_data() {
+        let dir = TestDir::new();
+        let target = dir.target();
+        let service = DownloadService::new(Client::new());
+        let neighbor = target.with_file_name("unrelated.mp4");
+        fs::write(&neighbor, b"keep").await.unwrap();
+        fs::write(&target, b"video").await.unwrap();
+        fs::write(service.partial_path_for(&target), b"partial")
+            .await
+            .unwrap();
+        let cache = hls::cache_path(&target);
+        fs::create_dir_all(&cache).await.unwrap();
+        fs::write(cache.join("segment-0.ts"), b"cached")
+            .await
+            .unwrap();
+        service.delete_download_files(&target).await.unwrap();
+        assert!(!target.exists());
+        assert!(!cache.exists());
+        assert!(!service.partial_path_for(&target).exists());
+        assert_eq!(fs::read(neighbor).await.unwrap(), b"keep");
+        service.delete_download_files(&target).await.unwrap(); // missing files are safe
+        fs::create_dir(&target).await.unwrap();
+        assert!(service.delete_download_files(&target).await.is_err()); // never recursively delete the target
+        assert!(target.is_dir());
     }
 
     #[tokio::test]

@@ -63,6 +63,7 @@ impl Storage {
         add_column("scheduled_at", "TEXT");
         add_column("bandwidth_limit_kbps", "INTEGER");
         add_column("category", "TEXT");
+        add_column("resume_job", "TEXT");
 
         connection
             .execute_batch(
@@ -76,6 +77,38 @@ impl Storage {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
+    }
+
+    // Kept out of DownloadRecord/IPC: captured headers can contain credentials.
+    pub fn save_resume_job(&self, job: &crate::app::QueuedDownload) -> Result<(), String> {
+        let json = serde_json::to_string(job).map_err(|e| e.to_string())?;
+        self.connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE downloads SET resume_job = ?1 WHERE id = ?2",
+                params![json, job.id],
+            )
+            .map_err(|e| format!("failed to save resume information: {e}"))?;
+        Ok(())
+    }
+
+    pub fn load_resume_job(&self, id: i64) -> Result<Option<crate::app::QueuedDownload>, String> {
+        let json: Option<String> = self
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT resume_job FROM downloads WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("failed to read resume information: {e}"))?;
+        json.map(|value| {
+            serde_json::from_str(&value)
+                .map_err(|_| "Saved resume information is invalid".to_string())
+        })
+        .transpose()
     }
 
     pub fn insert_download(&self, record: NewDownloadRecord) -> Result<DownloadRecord, String> {
@@ -257,7 +290,7 @@ impl Storage {
             .prepare(
                 "SELECT id, url, file_name, save_path, total_bytes, downloaded_bytes, status,
                         error_message, expected_checksum, actual_checksum, checksum_status,
-                        scheduled_at, bandwidth_limit_kbps
+                        scheduled_at, bandwidth_limit_kbps, category
                  FROM downloads WHERE status IN ('queued', 'in_progress', 'scheduled')
                  ORDER BY id ASC",
             )

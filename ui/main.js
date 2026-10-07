@@ -141,13 +141,27 @@ async function clearDownload(id){
   const d=state.downloads.find(d=>d.id===id);if(!d||canPause(merged(d)))return;
   try{await invoke('clear_download',{id});state.live.delete(id);state.selected.delete(id);lastList='';await loadDownloads();}catch(e){setNotice($('notice'),String(e),'error');}
 }
+function confirmFileDeletion(fileName){
+  return new Promise(resolve=>{
+    const dialog=document.createElement('dialog');dialog.className='delete-confirm';
+    dialog.innerHTML='<h2>Delete downloaded files?</h2><p class="delete-file-name"></p><p>This permanently deletes the downloaded file and its temporary data, and removes it from the list.</p><form method="dialog"><button value="cancel" autofocus>Cancel</button><button value="delete" class="danger">Delete files</button></form>';
+    dialog.querySelector('.delete-file-name').textContent=fileName;
+    dialog.addEventListener('close',()=>{const confirmed=dialog.returnValue==='delete';dialog.remove();resolve(confirmed);},{once:true});
+    document.body.appendChild(dialog);dialog.showModal();
+  });
+}
+async function deleteDownloadFiles(id){
+  const d=state.downloads.find(d=>d.id===id);if(!d||canPause(merged(d)))return;
+  if(!await confirmFileDeletion(d.fileName))return;
+  try{await invoke('delete_download_files',{id});state.live.delete(id);state.selected.delete(id);lastList='';await loadDownloads();}catch(e){setNotice($('notice'),String(e),'error');}
+}
 function ensureContextMenu(){
   let menu=$('context-menu');if(menu)return menu;menu=document.createElement('div');menu.id='context-menu';menu.className='context-menu';menu.hidden=true;menu.setAttribute('role','menu');document.body.appendChild(menu);
-  menu.addEventListener('click',async e=>{const b=e.target.closest('[data-menu-action]');if(!b||b.disabled)return;const id=state.contextMenuId,action=b.dataset.menuAction;hideContextMenu();if(action==='detail')await openDetail(id);else if(action==='clear')await clearDownload(id);else await safe(()=>invoke(action==='folder'?'open_download_folder':action,{id}));await loadDownloads();});return menu;
+  menu.addEventListener('click',async e=>{const b=e.target.closest('[data-menu-action]');if(!b||b.disabled)return;const id=state.contextMenuId,action=b.dataset.menuAction;hideContextMenu();if(action==='detail')await openDetail(id);else if(action==='clear')await clearDownload(id);else if(action==='delete-files')await deleteDownloadFiles(id);else await safe(()=>invoke(action==='folder'?'open_download_folder':action,{id}));await loadDownloads();});return menu;
 }
 function openContextMenu(id,x,y){
   const d=state.downloads.find(d=>d.id===id);if(!d)return;const row=merged(d),menu=ensureContextMenu();state.contextMenuId=id;
-  const items=[['detail','Show details',true],['folder','Show in folder',true],['pause_download','Pause',canPause(row)],['resume_download','Resume / retry',canResume(row)],['clear','Remove from list (keep file)',!canPause(row)]];
+  const items=[['detail','Show details',true],['folder','Show in folder',true],['pause_download','Pause',canPause(row)],['resume_download','Resume / retry',canResume(row)],['clear','Remove from list (keep file)',!canPause(row)],['delete-files','Delete files and remove from list',!canPause(row)]];
   menu.innerHTML=items.map(([a,t,enabled])=>`<button role="menuitem" data-menu-action="${a}" ${enabled?'':'disabled'}>${t}</button>`).join('');menu.hidden=false;menu.style.left=`${Math.max(6,Math.min(x,window.innerWidth-menu.offsetWidth-6))}px`;menu.style.top=`${Math.max(6,Math.min(y,window.innerHeight-menu.offsetHeight-6))}px`;
 }
 function hideContextMenu(){const menu=$('context-menu');if(menu)menu.hidden=true;state.contextMenuId=null;}

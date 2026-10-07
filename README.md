@@ -120,7 +120,7 @@ The app respects `XDG_DOWNLOAD_DIR` in `~/.config/user-dirs.dirs`, so the base d
 
 **Choosing a custom Save folder changes the base directory.** The app still creates `LDM/<category>` inside it. For example, choosing `/mnt/media` saves videos under `/mnt/media/LDM/Videos/`. Select the base folder, rather than an existing `LDM/Videos` subfolder, to avoid nested library folders.
 
-Use **Show in folder** on a download to find its exact location. Sidebar categories filter your download history; they do not move existing files. **Clear completed** removes history entries only, leaving the downloaded files on disk.
+Use **Show in folder** on a download to find its exact location. Sidebar categories filter your download history; they do not move existing files. **Clear completed** and **Remove from list (keep file)** remove history entries only, leaving files on disk. To delete a download and its temporary files, pause it first, right-click it, and choose **Delete files and remove from list**. A confirmation appears before permanent deletion.
 
 ## Everyday use
 
@@ -128,6 +128,9 @@ Use **Show in folder** on a download to find its exact location. Sidebar categor
 2. Click **Start download**. The app checks the link automatically; **Check link** is also available separately.
 3. Watch **Speed** and **Time left** in the download row. Double-click the row for details.
 4. Select several files to pause or resume them together. Use **Settings** to adjust concurrency, the default speed limit or notifications.
+
+
+Paused downloads now retain their original media type, headers, source page and quality selection across application restarts. Plain HLS downloads reuse completed cached segments when resumed. Older entries created before this update may lack this information; if one cannot resume, capture it again from the browser. Expired server links may also require a fresh capture.
 
 The default concurrency is **3 downloads**, the default speed limit is **unlimited**, and desktop notifications are enabled by default. Closing the window hides it to the tray; it does not quit the application.
 

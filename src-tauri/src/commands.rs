@@ -1,4 +1,4 @@
-use crate::app::{AppState, DownloadEventUpdate, QueuedDownload};
+use crate::app::{AppState, DownloadEventUpdate};
 use crate::download::{DownloadMetadata, DownloadRecord, DownloadSegmentDetail};
 use crate::jobs::{DownloadJobRequest, queue_download_request};
 use serde::Serialize;
@@ -125,7 +125,7 @@ pub async fn pause_download(
     state: State<'_, AppState>,
     id: i64,
 ) -> Result<(), String> {
-    state.pause_download(id)?;
+    state.pause_download(id).await?;
     // The list merges this event over its stored row, so it has to carry the
     // progress `pause_download` just persisted. Emitting zeros here wiped the
     // visible percentage back to 0% and made a resume look like a fresh start.
@@ -151,35 +151,20 @@ pub async fn resume_download(
     id: i64,
 ) -> Result<DownloadRecord, String> {
     let record = state.storage.get_download(id)?;
-    let metadata = state.download_service.inspect_url(&record.url).await?;
-
+    if !matches!(record.status.as_str(), "paused" | "failed" | "cancelled") {
+        return Err("Only paused or failed downloads can be resumed".to_string());
+    }
+    let mut job = state.resume_job(&record)?;
+    // Explicit Resume should start now, not wait for an old schedule.
+    job.scheduled_at = None;
     state.storage.set_status(
         id,
         "queued",
         record.downloaded_bytes,
-        record.total_bytes.or(metadata.content_length),
+        job.total_bytes_hint,
         None,
     )?;
-    state.enqueue_download(
-        &app_handle,
-        QueuedDownload {
-            id,
-            url: record.url,
-            fallback_urls: Vec::new(),
-            audio_url: None,
-            source_page_url: None,
-            http_headers: Default::default(),
-            format: None,
-            force_ytdlp: false,
-            stream_manifest: false,
-            target_path: std::path::Path::new(&record.save_path).to_path_buf(),
-            resumable_hint: metadata.resumable,
-            total_bytes_hint: record.total_bytes.or(metadata.content_length),
-            expected_checksum: record.expected_checksum,
-            scheduled_at: record.scheduled_at,
-            bandwidth_limit_kbps: record.bandwidth_limit_kbps,
-        },
-    )?;
+    state.enqueue_download(&app_handle, job)?;
 
     state.storage.get_download(id)
 }
@@ -294,6 +279,23 @@ pub async fn clear_completed(state: State<'_, AppState>) -> Result<u64, String> 
 /// Clears a single download from the list/history. The file on disk is kept.
 #[tauri::command]
 pub async fn clear_download(state: State<'_, AppState>, id: i64) -> Result<bool, String> {
+    state.clear_download(id)
+}
+
+/// Explicit destructive action, called only after the UI confirmation.
+#[tauri::command]
+pub async fn delete_download_files(state: State<'_, AppState>, id: i64) -> Result<bool, String> {
+    let record = state.storage.get_download(id)?;
+    if matches!(
+        record.status.as_str(),
+        "in_progress" | "queued" | "scheduled"
+    ) {
+        return Err("Pause the download before deleting its files".to_string());
+    }
+    state
+        .download_service
+        .delete_download_files(std::path::Path::new(&record.save_path))
+        .await?;
     state.clear_download(id)
 }
 

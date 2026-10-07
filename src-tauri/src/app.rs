@@ -7,7 +7,7 @@ use crate::jobs::{DownloadJobRequest, queue_download_request};
 use crate::storage::Storage;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::PathBuf;
@@ -60,7 +60,7 @@ struct DownloadQueueState {
     pending: VecDeque<QueuedDownload>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct QueuedDownload {
     pub id: i64,
     pub url: String,
@@ -244,28 +244,38 @@ impl AppState {
                     ..Default::default()
                 },
             );
-            self.enqueue_download(
-                app_handle,
-                QueuedDownload {
-                    id: record.id,
-                    url: record.url,
-                    fallback_urls: Vec::new(),
-                    target_path: PathBuf::from(record.save_path),
-                    audio_url: None,
-                    source_page_url: None,
-                    http_headers: HashMap::new(),
-                    format: None,
-                    force_ytdlp: false,
-                    stream_manifest: false,
-                    resumable_hint: record.downloaded_bytes > 0,
-                    total_bytes_hint: record.total_bytes,
-                    expected_checksum: record.expected_checksum,
-                    scheduled_at: record.scheduled_at,
-                    bandwidth_limit_kbps: record.bandwidth_limit_kbps,
-                },
-            )?;
+            let job = self.resume_job(&record)?;
+            self.enqueue_download(app_handle, job)?;
         }
         Ok(())
+    }
+
+    pub fn resume_job(
+        &self,
+        record: &crate::download::DownloadRecord,
+    ) -> Result<QueuedDownload, String> {
+        let mut job = self
+            .storage
+            .load_resume_job(record.id)?
+            .unwrap_or_else(|| QueuedDownload {
+                id: record.id,
+                url: record.url.clone(),
+                fallback_urls: Vec::new(),
+                audio_url: None,
+                source_page_url: None,
+                http_headers: HashMap::new(),
+                format: None,
+                force_ytdlp: false,
+                stream_manifest: false,
+                target_path: PathBuf::from(&record.save_path),
+                resumable_hint: record.downloaded_bytes > 0,
+                total_bytes_hint: record.total_bytes,
+                expected_checksum: record.expected_checksum.clone(),
+                scheduled_at: record.scheduled_at.clone(),
+                bandwidth_limit_kbps: record.bandwidth_limit_kbps,
+            });
+        job.total_bytes_hint = record.total_bytes.or(job.total_bytes_hint);
+        Ok(job)
     }
 
     pub async fn poll_browser_inbox(&self, app_handle: &AppHandle) -> Result<(), String> {
@@ -421,13 +431,17 @@ impl AppState {
         }
     }
 
-    pub fn pause_download(&self, id: i64) -> Result<(), String> {
-        let mut queue = self.queue.lock().unwrap();
-        if let Some(handle) = queue.active.remove(&id) {
+    pub async fn pause_download(&self, id: i64) -> Result<(), String> {
+        let handle = {
+            let mut queue = self.queue.lock().unwrap();
+            queue.pending.retain(|job| job.id != id);
+            queue.active.remove(&id)
+        };
+        if let Some(handle) = handle {
             handle.abort();
+            // Wait until file writers have stopped before allowing Resume.
+            let _ = handle.await;
         }
-        queue.pending.retain(|job| job.id != id);
-        drop(queue);
         let record = self.storage.get_download(id)?;
         self.storage.set_status(
             id,
@@ -831,7 +845,56 @@ mod pause_tests {
     }
 
     #[test]
-    fn stopping_keeps_progress_partial_file_and_resume_offset() {
+    fn captured_resume_context_survives_restart_and_stays_out_of_public_records() {
+        let dir = test_dir("resume-context");
+        let state = state_at(&dir);
+        let record = state
+            .storage
+            .insert_download(NewDownloadRecord {
+                url: "https://example.com/opaque-token".into(),
+                file_name: "movie.mp4".into(),
+                save_path: dir.join("movie.mp4"),
+                total_bytes: None,
+                expected_checksum: None,
+                scheduled_at: None,
+                bandwidth_limit_kbps: None,
+                category: "video".into(),
+            })
+            .unwrap();
+        let mut job = state.resume_job(&record).unwrap();
+        job.stream_manifest = true;
+        job.force_ytdlp = true;
+        job.http_headers
+            .insert("Referer".into(), "https://example.com/player".into());
+        job.http_headers
+            .insert("Cookie".into(), "private-test-cookie".into());
+        job.source_page_url = Some("https://example.com/player".into());
+        job.audio_url = Some("https://example.com/audio".into());
+        job.fallback_urls = vec!["https://example.com/fallback".into()];
+        job.format = Some("best".into());
+        state.storage.save_resume_job(&job).unwrap();
+        drop(state);
+        let reopened = state_at(&dir);
+        let restored = reopened.resume_job(&record).unwrap();
+        assert_eq!(
+            serde_json::to_value(&restored).unwrap(),
+            serde_json::to_value(&job).unwrap()
+        );
+        assert_eq!(reopened.storage.get_resumable_downloads().unwrap().len(), 1);
+        assert!(
+            !serde_json::to_string(&reopened.storage.get_download(record.id).unwrap())
+                .unwrap()
+                .contains("private-test-cookie")
+        );
+        std::fs::write(&job.target_path, b"keep this file").unwrap();
+        reopened.clear_download(record.id).unwrap();
+        assert_eq!(std::fs::read(&job.target_path).unwrap(), b"keep this file");
+        assert!(reopened.storage.get_download(record.id).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopping_keeps_progress_partial_file_and_resume_offset() {
         let dir = test_dir("stop");
         let state = state_at(&dir);
         let target = dir.join("big.iso");
@@ -858,7 +921,32 @@ mod pause_tests {
         let partial = target.with_extension("part");
         std::fs::write(&partial, [7_u8; 260]).unwrap();
 
-        state.pause_download(created.id).unwrap();
+        struct WriterGuard(Arc<AtomicBool>);
+        impl Drop for WriterGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let stopped = Arc::new(AtomicBool::new(false));
+        let guard = WriterGuard(stopped.clone());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tauri::async_runtime::spawn(async move {
+            let _guard = guard;
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        state
+            .queue
+            .lock()
+            .unwrap()
+            .active
+            .insert(created.id, handle);
+        started_rx.await.unwrap();
+        state.pause_download(created.id).await.unwrap();
+        assert!(
+            stopped.load(Ordering::SeqCst),
+            "Pause must wait for the old writer to stop"
+        );
 
         let record = state.storage.get_download(created.id).unwrap();
         assert_eq!(record.status, "paused");
