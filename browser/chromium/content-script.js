@@ -1087,9 +1087,31 @@ function isSameCandidate(left, right) {
   return left?.url === right?.url && left?.kind === right?.kind;
 }
 
+// Cross-origin players expose their media to the extension's background worker,
+// but the top page cannot inspect their video DOM. Anchor a capture button to
+// the visible player frame and ask the worker for the observed stream on click.
+function candidateFromPlayerFrame(frame) {
+  if (!(frame instanceof Element) || frame.tagName !== "IFRAME") return null;
+  const url = normalizeUrl(frame.getAttribute("src"));
+  if (!url) return null;
+  const path = new URL(url).pathname;
+  if (!/(?:^|\/)(?:embed|player)(?:[/.]|$)/i.test(path)) return null;
+  const rect = frame.getBoundingClientRect();
+  if (rect.width < 180 || rect.height < 120 || !isVisibleMediaRect(rect)) return null;
+  // An embed page is HTML, not the downloadable media URL.
+  return { element: frame, url: null, kind: "media-fallback" };
+}
+
 function collectOverlayTargets() {
   const results = [];
   const seen = new Set();
+
+  for (const frame of document.querySelectorAll("iframe[src]")) {
+    const candidate = candidateFromPlayerFrame(frame);
+    if (!candidate) continue;
+    seen.add(frame);
+    results.push({ element: frame, candidate });
+  }
 
   for (const container of document.querySelectorAll(MEDIA_CONTAINER_SELECTOR)) {
     if (!(container instanceof Element)) {

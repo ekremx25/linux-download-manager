@@ -210,6 +210,7 @@ CARGO_BUILD_JOBS=1 cargo build --release --locked --bins
 # Backend and regression tests
 cargo test --workspace
 node scripts/test-progress-ui.cjs
+node scripts/test-embedded-player.cjs
 python3 scripts/test-installer.py
 
 # Optional: requires installed yt-dlp; uses a localhost fixture
