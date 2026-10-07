@@ -112,7 +112,7 @@ function isExcludedHost(hostname) {
 }
 
 function bootstrap() {
-  if (/(^|\.)molystream\.org$/i.test(window.location.hostname)) {
+  if (/(^|\.)(molystream\.org|hotstream\.club)$/i.test(window.location.hostname)) {
     window.addEventListener("message", (event) => {
       if (event.source !== window || event.data?.type !== "ldm-player-manifest") return;
       const url = normalizeUrl(event.data.url);
@@ -388,6 +388,7 @@ function triggerCaptureWithFormat(candidate, format) {
       type: "capture-best-media",
       payload: {
         preferredUrl: candidate.url ?? null,
+        playerPageUrl: candidate.playerPageUrl ?? null,
         sourcePageUrl: sourcePageUrl,
         sourceTitle: candidate.title || document.title,
         format: format ?? null
@@ -1099,7 +1100,7 @@ function candidateFromPlayerFrame(frame) {
   const rect = frame.getBoundingClientRect();
   if (rect.width < 180 || rect.height < 120 || !isVisibleMediaRect(rect)) return null;
   // An embed page is HTML, not the downloadable media URL.
-  return { element: frame, url: null, kind: "media-fallback" };
+  return { element: frame, url: null, kind: "media-fallback", playerPageUrl: url };
 }
 
 function collectOverlayTargets() {

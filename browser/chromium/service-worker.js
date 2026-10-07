@@ -204,7 +204,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       tabId,
       message.payload?.preferredUrl,
       message.payload?.sourcePageUrl ?? sender.tab?.url ?? null,
-      message.payload?.sourceTitle ?? sender.tab?.title ?? null
+      message.payload?.sourceTitle ?? sender.tab?.title ?? null,
+      message.payload?.playerPageUrl ?? null
     );
     if (!payload?.ok) {
       sendResponse({
@@ -796,7 +797,17 @@ function canTryYtdlpPage(pageUrl) {
     && !/(^|\.)yabancidizi\.news$/i.test(parsedUrl.hostname));
 }
 
-function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourceTitle) {
+function candidateBelongsToPlayer(candidate, playerPageUrl) {
+  const player = safeParseUrl(playerPageUrl);
+  const referrer = safeParseUrl(candidate.referrerUrl);
+  if (!player || !referrer || player.origin !== referrer.origin) return false;
+  // Network request initiators can contain only the origin. DOM observations
+  // provide the full player URL, which also separates players on the same host.
+  return referrer.pathname === "/" ||
+    (referrer.pathname === player.pathname && referrer.search === player.search);
+}
+
+function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourceTitle, playerPageUrl = null) {
   // X serves some captured video renditions without audio. Download from the
   // post instead so yt-dlp can select and merge the complete media.
   if (isTwitterStatusPageUrl(sourcePageUrl)) {
@@ -831,9 +842,14 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
 
   const candidates = getMediaCandidatesForTab(tabId).filter(
     (candidate) => candidate.streamKind !== "fragment"
+      && (!playerPageUrl || candidateBelongsToPlayer(candidate, playerPageUrl))
   );
+  // Never fall back to extracting the outer page: it may contain a trailer or ad.
+  if (playerPageUrl && candidates.length === 0) {
+    return { ok: false, error: "The selected player's video stream has not been detected. Reload the page, play the main video, and try again." };
+  }
   if (candidates.length === 0) {
-    if (canTryYtdlpPage(sourcePageUrl)) {
+    if (!playerPageUrl && canTryYtdlpPage(sourcePageUrl)) {
       return {
         ok: true,
         capture: {
@@ -879,7 +895,7 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
       : null;
 
   if (!videoCandidate?.url) {
-    if (canTryYtdlpPage(sourcePageUrl)) {
+    if (!playerPageUrl && canTryYtdlpPage(sourcePageUrl)) {
       return {
         ok: true,
         capture: {
@@ -899,7 +915,7 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
   }
 
   if (requiresCompanionAudio(videoCandidate) && !audioCandidate?.url) {
-    if (canTryYtdlpPage(sourcePageUrl)) {
+    if (!playerPageUrl && canTryYtdlpPage(sourcePageUrl)) {
       return {
         ok: true,
         capture: {
