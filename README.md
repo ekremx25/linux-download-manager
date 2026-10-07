@@ -247,3 +247,12 @@ cargo test --workspace prefetched_hls_muxes_to_playable_mp4 -- --ignored
 | `docs/images/` | README screenshot |
 
 Built with [Tauri](https://tauri.app/), [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [FFmpeg](https://ffmpeg.org/).
+
+### Embedded video players
+
+The browser extension follows nested player frames when matching a capture to
+the selected video. Start playback before using its download button. If capture
+fails, the error is shown without creating a diagnostic file automatically.
+To export a diagnostic report explicitly, right-click the extension toolbar icon
+and choose **Export capture diagnostics**. Reload the extension and video page
+after installing an extension update.

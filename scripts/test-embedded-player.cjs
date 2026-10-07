@@ -46,3 +46,28 @@ xhr.responseText='<html>not a playlist</html>';xhr.loaded();assert.equal(publish
 const manifest=JSON.parse(fs.readFileSync('browser/chromium/manifest.json','utf8'));
 assert.ok(manifest.content_scripts.some(s=>s.world==='MAIN'&&s.matches.includes('https://*.hotstream.club/*')));
 console.log('PASS: player manifest response recognized without extra network requests');
+
+// Regression: the selected Dizibox frame wraps a second, cross-origin player.
+vm.runInContext(`
+rememberPlayerFrames(2,0,'https://www.dizibox.live/episode',[
+  'https://www.dizibox.live/player/king/king.php?v=main', 'https://ad.example/embed/ad']);
+rememberPlayerFrames(2,42,'https://www.dizibox.live/player/king/king.php?v=main',[
+  'https://dbx.molystream.org/embed/main']);
+rememberPlayerFrames(2,43,'https://dbx.molystream.org/embed/main',[]);
+rememberMediaRequest(2,'https://dbx.molystream.org/opaque','observed-manifest','https://dbx.molystream.org/embed/main');
+rememberMediaRequest(2,'https://ad.example/master.m3u8','observed-manifest','https://ad.example/embed/ad');
+`,worker);
+chosen=vm.runInContext("chooseBestMediaCapturePayload(2,null,'https://www.dizibox.live/episode','Episode','https://www.dizibox.live/player/king/king.php?v=main')",worker);
+assert.equal(chosen.ok,true);
+assert.equal(chosen.capture.url,'https://dbx.molystream.org/opaque');
+assert.equal(chosen.capture.sourcePageUrl,'https://dbx.molystream.org/embed/main');
+assert.equal(chosen.capture.streamManifest,true);
+assert.deepEqual(Array.from(chosen.capture.fallbackUrls),[]);
+// A navigated frame must replace the old child relationship, not accumulate it.
+vm.runInContext("rememberPlayerFrames(2,42,'https://www.dizibox.live/player/king/king.php?v=main',[])",worker);
+assert.equal(vm.runInContext("candidateBelongsToPlayer({referrerUrl:'https://dbx.molystream.org/embed/main'},'https://www.dizibox.live/player/king/king.php?v=main',2)",worker),false);
+assert.equal(vm.runInContext("candidateBelongsToPlayer({referrerUrl:'https://dbx.molystream.org/embed/main'},'https://www.dizibox.live/player/king/king.php?v=main',99)",worker),false);
+// Cycles in reported embeds cannot hang the extension.
+vm.runInContext("rememberPlayerFrames(2,42,'https://www.dizibox.live/player/king/king.php?v=main',['https://www.dizibox.live/player/king/king.php?v=main'])",worker);
+assert.equal(vm.runInContext("candidateBelongsToPlayer({referrerUrl:'https://unrelated.example/'},'https://www.dizibox.live/player/king/king.php?v=main',2)",worker),false);
+console.log('PASS: nested player captured, sibling ads excluded, navigation replaces ancestry, cycles bounded');

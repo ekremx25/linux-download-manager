@@ -42,6 +42,7 @@ const IMAGE_EXTENSIONS = new Set(["avif", "bmp", "gif", "jpeg", "jpg", "png", "s
 const recentCaptures = new Map();
 const recentMediaByTab = new Map();
 const captureDiagnostics = new Map();
+const playerFramesByTab = new Map();
 function diagnosticUrl(raw) {
   try { const u = new URL(raw); return { origin: u.origin, protocol: u.protocol,
     extension: u.pathname.match(/\.([a-z0-9]{1,8})$/i)?.[1] ?? "none" }; }
@@ -65,6 +66,7 @@ function saveCaptureDiagnostic(tabId, page) {
 chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOR });
 
 chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.create({id: "linux-download-manager.diagnostics", title: "Export capture diagnostics", contexts: ["action"]});
   chrome.contextMenus.create({
     id: MENU_DOWNLOAD_LINK,
     title: "Download link with Linux Download Manager",
@@ -99,6 +101,10 @@ chrome.action.onClicked.addListener((tab) => {
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === "linux-download-manager.diagnostics") {
+    saveCaptureDiagnostic(tab?.id, tab?.url);
+    return;
+  }
   if (info.menuItemId === MENU_DOWNLOAD_LINK) {
     sendToNativeHost({
       url: info.linkUrl,
@@ -137,6 +143,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "capture-diagnostic-frame") {
     if (typeof tabId === "number" && tabId >= 0) {
+      rememberPlayerFrames(tabId, sender.frameId ?? 0, sender.url, message.embeds ?? []);
       diagnosticState(tabId).frames[sender.frameId ?? 0] = {
         location: diagnosticUrl(sender.url), seenAt: Date.now(),
         media: (message.media ?? []).slice(0, 12).map(m => ({source: diagnosticUrl(m.src), readyState: m.readyState, paused: m.paused})),
@@ -212,8 +219,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ok: false,
         error: payload?.error ?? "The video stream could not be captured yet. Reload the page, play the video, and try again."
       });
-      try { saveCaptureDiagnostic(tabId, sender.tab?.url); }
-      catch (error) { console.warn("LDM diagnostic export failed", error); }
       return;
     }
 
@@ -232,6 +237,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   recentMediaByTab.delete(tabId);
   captureDiagnostics.delete(tabId);
+  playerFramesByTab.delete(tabId);
   chrome.action.setBadgeText({ tabId, text: "" });
 });
 
@@ -242,6 +248,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
   recentMediaByTab.delete(tabId);
   captureDiagnostics.delete(tabId);
+  playerFramesByTab.delete(tabId);
   chrome.action.setBadgeText({ tabId, text: "" });
 });
 
@@ -797,14 +804,36 @@ function canTryYtdlpPage(pageUrl) {
     && !/(^|\.)yabancidizi\.news$/i.test(parsedUrl.hostname));
 }
 
-function candidateBelongsToPlayer(candidate, playerPageUrl) {
-  const player = safeParseUrl(playerPageUrl);
+// Keep the frame tree reported by our all-frames content script. A selected
+// outer player may embed the actual streaming player on another origin.
+function rememberPlayerFrames(tabId, frameId, pageUrl, embeds) {
+  const page = normalizePageUrl(pageUrl);
+  if (!page) return;
+  if (!playerFramesByTab.has(tabId)) playerFramesByTab.set(tabId, new Map());
+  const frames = playerFramesByTab.get(tabId);
+  frames.set(frameId, {page, children: embeds.slice(0, 12).map(normalizePageUrl).filter(Boolean)});
+  if (frames.size > 64) frames.delete(frames.keys().next().value);
+}
+
+function candidateBelongsToPlayer(candidate, playerPageUrl, tabId) {
   const referrer = safeParseUrl(candidate.referrerUrl);
-  if (!player || !referrer || player.origin !== referrer.origin) return false;
-  // Network request initiators can contain only the origin. DOM observations
-  // provide the full player URL, which also separates players on the same host.
-  return referrer.pathname === "/" ||
-    (referrer.pathname === player.pathname && referrer.search === player.search);
+  if (!referrer) return false;
+  const frames = playerFramesByTab.get(tabId);
+  const pending = [normalizePageUrl(playerPageUrl)];
+  const visited = new Set();
+  while (pending.length && visited.size < 64) {
+    const page = pending.pop();
+    if (!page || visited.has(page)) continue;
+    visited.add(page);
+    const player = safeParseUrl(page);
+    if (player && player.origin === referrer.origin &&
+        (referrer.pathname === "/" ||
+         (referrer.pathname === player.pathname && referrer.search === player.search))) return true;
+    if (frames) for (const frame of frames.values()) {
+      if (frame.page === page) pending.push(...frame.children);
+    }
+  }
+  return false;
 }
 
 function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourceTitle, playerPageUrl = null) {
@@ -842,7 +871,7 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
 
   const candidates = getMediaCandidatesForTab(tabId).filter(
     (candidate) => candidate.streamKind !== "fragment"
-      && (!playerPageUrl || candidateBelongsToPlayer(candidate, playerPageUrl))
+      && (!playerPageUrl || candidateBelongsToPlayer(candidate, playerPageUrl, tabId))
   );
   // Never fall back to extracting the outer page: it may contain a trailer or ad.
   if (playerPageUrl && candidates.length === 0) {
