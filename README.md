@@ -139,7 +139,10 @@ The default concurrency is **3 downloads**, the default speed limit is **unlimit
 Plain, finite HLS media playlists can download up to four segments in parallel.
 Self-contained master playlists are followed to the highest-bandwidth rendition;
 relative child URLs are resolved against the playlist that contains them.
-Completed segments are cached locally, then FFmpeg creates the MP4. If AAC audio
+Completed segments are cached locally, then FFmpeg creates the MP4.
+If parallel segment requests fail after retries, LDM keeps that cache and tries
+the existing FFmpeg download path and captured alternative playlists. This cannot
+make an unavailable server reachable; local disk errors still stop the download. If AAC audio
 needs repair, the retry uses the cached video instead of downloading it again.
 The transfer estimate is based on completed segment sizes; final processing can
 continue after the network transfer reaches 100%.

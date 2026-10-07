@@ -653,6 +653,10 @@ impl DownloadService {
                 on_progress,
             )
             .await?;
+            if prepared.is_none() {
+                // Reset any prefetch estimate before the network fallback starts.
+                on_started(0, None, 1)?;
+            }
             let mut attempt = 0;
             let mut repair_audio = false;
             loop {
@@ -803,6 +807,8 @@ impl DownloadService {
         fs::rename(&temp_path, target_path)
             .await
             .map_err(|error| format!("failed to finalize downloaded stream file: {error}"))?;
+        // Fallback success no longer needs a cache left by failed prefetch.
+        let _ = fs::remove_dir_all(hls::cache_path(target_path)).await;
 
         Ok((downloaded_bytes, None, 1))
     }

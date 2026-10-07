@@ -5,6 +5,12 @@ use super::*;
 const PARALLEL: usize = 4;
 const PLAYLIST_LIMIT: usize = 2 * 1024 * 1024;
 
+#[derive(Debug)]
+enum SegmentFailure {
+    Network,
+    Local(String),
+}
+
 pub(super) struct Prepared {
     pub playlist: PathBuf,
     cache: PathBuf,
@@ -240,35 +246,49 @@ pub(super) async fn prepare(
                     let response = request(client, &url, &credential_origin, headers, referer)
                         .send()
                         .await
-                        .map_err(|e| e.to_string())?
+                        .map_err(|_| SegmentFailure::Network)?
                         .error_for_status()
-                        .map_err(|e| e.to_string())?;
-                    let file = fs::File::create(&part).await.map_err(|e| e.to_string())?;
+                        .map_err(|_| SegmentFailure::Network)?;
+                    let file = fs::File::create(&part)
+                        .await
+                        .map_err(|e| SegmentFailure::Local(e.to_string()))?;
                     let mut file = BufWriter::with_capacity(256 * 1024, file);
                     let mut stream = response.bytes_stream();
                     let mut written = 0u64;
                     while let Some(chunk) = stream.next().await {
-                        let chunk = chunk.map_err(|e| e.to_string())?;
-                        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+                        let chunk = chunk.map_err(|_| SegmentFailure::Network)?;
+                        file.write_all(&chunk)
+                            .await
+                            .map_err(|e| SegmentFailure::Local(e.to_string()))?;
                         written += chunk.len() as u64;
                     }
-                    file.flush().await.map_err(|e| e.to_string())?;
+                    file.flush()
+                        .await
+                        .map_err(|e| SegmentFailure::Local(e.to_string()))?;
                     if written == 0 {
-                        return Err("empty segment".to_string());
+                        return Err(SegmentFailure::Network);
                     }
                     fs::rename(&part, &output)
                         .await
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| SegmentFailure::Local(e.to_string()))?;
                     bytes.fetch_add(written, Ordering::Relaxed);
-                    Ok::<(), String>(())
+                    Ok::<(), SegmentFailure>(())
                 }
                 .await;
                 match result {
                     Ok(()) => return Ok(()),
-                    Err(error) if attempt == 2 => {
-                        return Err(format!("HLS segment {} failed: {error}", index + 1));
+                    Err(SegmentFailure::Local(error)) => {
+                        return Err(SegmentFailure::Local(format!(
+                            "HLS segment {}: {error}",
+                            index + 1
+                        )));
                     }
-                    Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+                    Err(SegmentFailure::Network) if attempt == 2 => {
+                        return Err(SegmentFailure::Network);
+                    }
+                    Err(SegmentFailure::Network) => {
+                        tokio::time::sleep(Duration::from_millis(500 * (attempt + 1))).await
+                    }
                 }
             }
             unreachable!()
@@ -277,7 +297,13 @@ pub(super) async fn prepare(
     .buffer_unordered(PARALLEL);
     tokio::pin!(jobs);
     while let Some(result) = jobs.next().await {
-        result?;
+        match result {
+            Ok(()) => {}
+            // Drop unfinished requests but keep completed cache files. The caller
+            // can now try FFmpeg and its alternative playlists instead of failing.
+            Err(SegmentFailure::Network) => return Ok(None),
+            Err(SegmentFailure::Local(error)) => return Err(error),
+        }
         completed += 1;
         let downloaded = bytes.load(Ordering::Relaxed);
         // This estimate is based on finished segment sizes, not the MP4 output.
@@ -419,7 +445,9 @@ mod integration_tests {
                         let mut input = [0; 4096];
                         let n = socket.read(&mut input).unwrap_or(0);
                         let header = String::from_utf8_lossy(&input[..n]);
-                        let body = if header.starts_with("GET /playlist.m3u8 ") {
+                        let body = if header.starts_with("GET /unreachable.m3u8 ") {
+                            b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nhttp://127.0.0.1:0/unreachable.ts\n#EXT-X-ENDLIST\n".to_vec()
+                        } else if header.starts_with("GET /playlist.m3u8 ") {
                             b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nmedia.m3u8\n".to_vec()
                         } else if header.starts_with("GET /media.m3u8 ") {
                             format!(
@@ -469,6 +497,42 @@ mod integration_tests {
         std::fs::create_dir_all(&root).unwrap();
         root.join("movie.mp4")
     }
+    #[tokio::test]
+    async fn unreachable_segment_falls_back_but_local_storage_failure_does_not() {
+        let fixture = Fixture::start(vec![7; 128]);
+        let client = Client::new();
+        let target = test_target("unreachable");
+        let result = prepare(
+            &client,
+            &fixture.url.join("unreachable.m3u8").unwrap(),
+            &target,
+            &HashMap::new(),
+            None,
+            &mut |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            result.is_none(),
+            "transport errors must leave FFmpeg fallback available"
+        );
+        let blocked = target.with_file_name("blocked");
+        fs::write(&blocked, b"not a directory").await.unwrap();
+        assert!(
+            prepare(
+                &client,
+                &fixture.url,
+                &blocked.join("movie.mp4"),
+                &HashMap::new(),
+                None,
+                &mut |_| Ok(())
+            )
+            .await
+            .is_err()
+        );
+        fs::remove_dir_all(target.parent().unwrap()).await.unwrap();
+    }
+
     #[tokio::test]
     async fn parallel_segments_keep_order_and_resume_without_redownloading() {
         let fixture = Fixture::start(vec![7; 4096]);
