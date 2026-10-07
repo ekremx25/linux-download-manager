@@ -38,6 +38,7 @@ fn focus_main_window(app: &tauri::AppHandle) {
 
 pub fn run() {
     let first_run = platform::is_first_run();
+    let start_hidden = std::env::args().any(|arg| arg == "--background");
     platform::run_first_time_setup();
 
     let state = AppState::bootstrap().unwrap_or_else(|error| {
@@ -47,8 +48,8 @@ pub fn run() {
     tauri::Builder::default()
         // Must stay first: a second launch focuses the running window instead
         // of starting a duplicate engine with its own download state.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            focus_main_window(app);
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if !argv.iter().any(|arg| arg == "--background") { focus_main_window(app); }
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -120,7 +121,7 @@ pub fn run() {
                 }
             }
 
-            if first_run
+            if (first_run || !start_hidden)
                 && let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.set_focus();
@@ -140,6 +141,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::inspect_url,
             commands::list_downloads,
+            commands::open_download_folder,
             commands::start_download,
             commands::pick_save_directory,
             commands::app_settings,

@@ -10,13 +10,35 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command, ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::fs;
-use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader, BufWriter};
+
+/// Byte counts always refer to the current transfer (video/audio may be separate).
+#[derive(Debug, Clone, Copy)]
+pub struct DownloadProgress {
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub active_parts: usize,
+    pub speed_bytes_per_second: Option<u64>,
+    pub eta_seconds: Option<u64>,
+}
+
+impl DownloadProgress {
+    fn bytes(downloaded_bytes: u64, total_bytes: Option<u64>, active_parts: usize) -> Self {
+        Self {
+            downloaded_bytes,
+            total_bytes,
+            active_parts,
+            speed_bytes_per_second: None,
+            eta_seconds: None,
+        }
+    }
+}
 
 const SEGMENT_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 /// A single flaky range request must not abandon the whole download: mirrors
@@ -46,10 +68,6 @@ impl KillOnDropChild {
 
     fn take_stderr(&mut self) -> Option<ChildStderr> {
         self.child.as_mut().and_then(|child| child.stderr.take())
-    }
-
-    fn wait_with_output(mut self) -> std::io::Result<Output> {
-        self.child.take().unwrap().wait_with_output()
     }
 }
 
@@ -390,7 +408,7 @@ impl DownloadService {
         target_path: &Path,
         options: DownloadOptions<'_>,
         mut on_started: impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
-        mut on_progress: impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
+        mut on_progress: impl FnMut(DownloadProgress) -> Result<(), String>,
     ) -> Result<(u64, Option<u64>, usize), String> {
         let DownloadOptions {
             requested_resume_from,
@@ -524,7 +542,7 @@ impl DownloadService {
         };
         let total_bytes = parse_content_length(response.headers());
         let temp_path = self.partial_path_for(target_path);
-        let mut file = if actual_resume_from > 0 {
+        let file = if actual_resume_from > 0 {
             fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -536,6 +554,7 @@ impl DownloadService {
                 .await
                 .map_err(|error| format!("failed to create temporary file: {error}"))?
         };
+        let mut file = BufWriter::with_capacity(256 * 1024, file);
         let mut stream = response.bytes_stream();
         let mut downloaded_bytes = actual_resume_from;
 
@@ -550,7 +569,11 @@ impl DownloadService {
                 .await
                 .map_err(|error| format!("failed to write downloaded bytes: {error}"))?;
             downloaded_bytes += chunk.len() as u64;
-            on_progress(downloaded_bytes, total_bytes.or(total_bytes_hint), 1)?;
+            on_progress(DownloadProgress::bytes(
+                downloaded_bytes,
+                total_bytes.or(total_bytes_hint),
+                1,
+            ))?;
         }
 
         file.flush()
@@ -571,7 +594,7 @@ impl DownloadService {
         http_headers: &HashMap<String, String>,
         target_path: &Path,
         on_started: &mut impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
-        on_progress: &mut impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
+        on_progress: &mut impl FnMut(DownloadProgress) -> Result<(), String>,
     ) -> Result<(u64, Option<u64>, usize), String> {
         ensure_ffmpeg_available()?;
 
@@ -626,58 +649,66 @@ impl DownloadService {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
 
-            let mut command = Command::new("ffmpeg");
-            command
-                .arg("-y")
-                .arg("-nostdin")
-                .arg("-loglevel")
-                .arg("error")
-                .arg("-user_agent")
-                .arg(user_agent)
-                .arg("-reconnect")
-                .arg("1")
-                .arg("-reconnect_streamed")
-                .arg("1")
-                .arg("-reconnect_delay_max")
-                .arg("5");
-            if let Some(referer) = referer.as_ref() {
-                command.arg("-referer").arg(referer.as_str());
-            }
-            if !forwarded_headers.is_empty() {
-                command.arg("-headers").arg(&forwarded_headers);
-            }
-            // DASH does not accept the HLS demuxer's segment options.
-            if !playlist_url.path().to_ascii_lowercase().ends_with(".mpd") {
+                let mut command = Command::new("ffmpeg");
                 command
-                    // Captured HLS playlists can have extensionless URLs and
-                    // text/html MIME types, which FFmpeg's probe rejects.
-                    .arg("-f").arg("hls")
-                    .arg("-allowed_segment_extensions").arg("ALL")
-                    .arg("-extension_picky").arg("0")
-                    .arg("-seg_max_retry").arg("5");
-            }
-            let mut child = KillOnDropChild::new(command
-                .arg("-allowed_extensions")
-                .arg("ALL")
-                .arg("-rw_timeout")
-                .arg("15000000")
-                .arg("-i")
-                .arg(playlist_url.as_str())
-                .arg("-map")
-                .arg("0:v?")
-                .arg("-map")
-                .arg("0:a?")
-                .arg("-c")
-                .arg("copy")
-                .arg("-movflags")
-                .arg("+faststart")
-                .arg("-f")
-                .arg("mp4")
-                .arg(&temp_path)
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|error| format!("failed to start ffmpeg for stream download: {error}"))?);
+                    .arg("-y")
+                    .arg("-nostdin")
+                    .arg("-loglevel")
+                    .arg("error")
+                    .arg("-user_agent")
+                    .arg(user_agent)
+                    .arg("-reconnect")
+                    .arg("1")
+                    .arg("-reconnect_streamed")
+                    .arg("1")
+                    .arg("-reconnect_delay_max")
+                    .arg("5");
+                if let Some(referer) = referer.as_ref() {
+                    command.arg("-referer").arg(referer.as_str());
+                }
+                if !forwarded_headers.is_empty() {
+                    command.arg("-headers").arg(&forwarded_headers);
+                }
+                // DASH does not accept the HLS demuxer's segment options.
+                if !playlist_url.path().to_ascii_lowercase().ends_with(".mpd") {
+                    command
+                        // Captured HLS playlists can have extensionless URLs and
+                        // text/html MIME types, which FFmpeg's probe rejects.
+                        .arg("-f")
+                        .arg("hls")
+                        .arg("-allowed_segment_extensions")
+                        .arg("ALL")
+                        .arg("-extension_picky")
+                        .arg("0")
+                        .arg("-seg_max_retry")
+                        .arg("5");
+                }
+                let mut child = KillOnDropChild::new(
+                    command
+                        .arg("-allowed_extensions")
+                        .arg("ALL")
+                        .arg("-rw_timeout")
+                        .arg("15000000")
+                        .arg("-i")
+                        .arg(playlist_url.as_str())
+                        .arg("-map")
+                        .arg("0:v?")
+                        .arg("-map")
+                        .arg("0:a?")
+                        .arg("-c")
+                        .arg("copy")
+                        .arg("-movflags")
+                        .arg("+faststart")
+                        .arg("-f")
+                        .arg("mp4")
+                        .arg(&temp_path)
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .map_err(|error| {
+                            format!("failed to start ffmpeg for stream download: {error}")
+                        })?,
+                );
 
             // FFmpeg can emit many transient network errors while an HLS stream is
             // running. Drain stderr concurrently so a full OS pipe cannot block the
@@ -690,35 +721,35 @@ impl DownloadService {
                 })
             });
 
-            let attempt_error = loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        if status.success() {
-                            break None;
+                let attempt_error = loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            if status.success() {
+                                break None;
+                            }
+                            let stderr = stderr_reader
+                                .and_then(|reader| reader.join().ok())
+                                .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
+                                .unwrap_or_default();
+                            break Some(if stderr.is_empty() {
+                                "ffmpeg could not finalize the media stream".to_string()
+                            } else {
+                                format!("ffmpeg failed: {stderr}")
+                            });
                         }
-                        let stderr = stderr_reader
-                            .and_then(|reader| reader.join().ok())
-                            .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
-                            .unwrap_or_default();
-                        break Some(if stderr.is_empty() {
-                            "ffmpeg could not finalize the media stream".to_string()
-                        } else {
-                            format!("ffmpeg failed: {stderr}")
-                        });
+                        Ok(None) => {
+                            let downloaded_bytes = fs::metadata(&temp_path)
+                                .await
+                                .map(|metadata| metadata.len())
+                                .unwrap_or(0);
+                            on_progress(DownloadProgress::bytes(downloaded_bytes, None, 1))?;
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                        }
+                        Err(error) => {
+                            break Some(format!("failed while polling ffmpeg process: {error}"));
+                        }
                     }
-                    Ok(None) => {
-                        let downloaded_bytes = fs::metadata(&temp_path)
-                            .await
-                            .map(|metadata| metadata.len())
-                            .unwrap_or(0);
-                        on_progress(downloaded_bytes, None, 1)?;
-                        tokio::time::sleep(Duration::from_millis(300)).await;
-                    }
-                    Err(error) => {
-                        break Some(format!("failed while polling ffmpeg process: {error}"));
-                    }
-                }
-            };
+                };
 
                 match attempt_error {
                     None => {
@@ -761,7 +792,7 @@ impl DownloadService {
         raw_audio_url: &str,
         target_path: &Path,
         mut on_started: impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
-        mut on_progress: impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
+        mut on_progress: impl FnMut(DownloadProgress) -> Result<(), String>,
     ) -> Result<(u64, Option<u64>, usize), String> {
         ensure_ffmpeg_available()?;
         let video_url = validate_url(raw_video_url)?;
@@ -835,7 +866,7 @@ impl DownloadService {
                         .await
                         .map(|metadata| metadata.len())
                         .unwrap_or(0);
-                    on_progress(downloaded_bytes, None, 2)?;
+                    on_progress(DownloadProgress::bytes(downloaded_bytes, None, 2))?;
                     tokio::time::sleep(Duration::from_millis(300)).await;
                 }
                 Err(error) => {
@@ -863,16 +894,22 @@ impl DownloadService {
         format: Option<&str>,
         use_browser_cookies: bool,
         on_started: &mut impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
-        on_progress: &mut impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
+        on_progress: &mut impl FnMut(DownloadProgress) -> Result<(), String>,
     ) -> Result<(u64, Option<u64>, usize), String> {
         let ytdlp_path = resolve_ytdlp_path().ok_or("yt-dlp is not available")?;
 
         on_started(0, None, 1)?;
 
         let format_spec = format.unwrap_or("bv*+ba/b");
-        let needs_cookies = use_browser_cookies || url.host_str().map(|h|
-            h.contains("facebook.com") || h.contains("fb.watch") || h.contains("instagram.com")
-        ).unwrap_or(false);
+        let needs_cookies = use_browser_cookies
+            || url
+                .host_str()
+                .map(|h| {
+                    h.contains("facebook.com")
+                        || h.contains("fb.watch")
+                        || h.contains("instagram.com")
+                })
+                .unwrap_or(false);
         let mut cmd = clean_env_command(&ytdlp_path);
         cmd.arg("--no-warnings")
             .arg("--no-playlist")
@@ -887,45 +924,26 @@ impl DownloadService {
         cmd.arg("-o")
             .arg(target_path)
             .arg("--print")
-            .arg("after_move:filepath")
+            .arg("after_move:LDM_FILE:%(filepath)j")
+            .arg("--newline")
+            .arg("--progress")
+            .arg("--no-simulate")
+            .arg("--no-color")
+            .arg("--progress-delta")
+            .arg("1")
+            .arg("--progress-template")
+            .arg("download:LDM_PROGRESS:%(progress)j")
             .arg(url.as_str())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped());
-        let child = KillOnDropChild::new(cmd
-            .spawn()
-            .map_err(|error| format!("failed to start yt-dlp: {error}"))?);
+        let actual_path = run_ytdlp(cmd, on_progress).await?;
 
-        let output = child
-            .wait_with_output()
-            .map_err(|error| format!("failed to run yt-dlp: {error}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let message = if stderr.is_empty() {
-                "yt-dlp could not download the video".to_string()
-            } else {
-                format!("yt-dlp failed: {stderr}")
-            };
-            return Err(message);
+        if !actual_path.exists() && !target_path.exists() {
+            return Err(format!(
+                "yt-dlp output file not found: {}",
+                actual_path.display()
+            ));
         }
-
-        let actual_path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if actual_path_str.is_empty() {
-            return Err("yt-dlp completed but did not report output file".to_string());
-        }
-
-        // yt-dlp may print multiple lines, take the last non-empty line
-        let final_file = actual_path_str
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or(&actual_path_str);
-        let actual_path = PathBuf::from(final_file.trim());
-
-        if !actual_path.exists()
-            && !target_path.exists() {
-                return Err(format!("yt-dlp output file not found: {}", actual_path.display()));
-            }
 
         if actual_path.exists() && actual_path != target_path {
             fs::rename(&actual_path, target_path)
@@ -938,7 +956,11 @@ impl DownloadService {
             .map(|metadata| metadata.len())
             .map_err(|error| format!("failed to inspect yt-dlp output: {error}"))?;
 
-        on_progress(downloaded_bytes, Some(downloaded_bytes), 1)?;
+        on_progress(DownloadProgress::bytes(
+            downloaded_bytes,
+            Some(downloaded_bytes),
+            1,
+        ))?;
         Ok((downloaded_bytes, Some(downloaded_bytes), 1))
     }
 
@@ -1031,7 +1053,7 @@ impl DownloadService {
         manifest: SegmentedDownloadManifest,
         throttle: Option<Arc<BandwidthThrottle>>,
         on_started: &mut impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
-        on_progress: &mut impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
+        on_progress: &mut impl FnMut(DownloadProgress) -> Result<(), String>,
     ) -> Result<(u64, Option<u64>, usize), String> {
         let total_bytes = manifest.total_bytes;
         let segment_count = manifest.segments.len();
@@ -1162,11 +1184,11 @@ impl DownloadService {
             tokio::select! {
                 biased;
                 _ = ticker.tick() => {
-                    on_progress(
+                    on_progress(DownloadProgress::bytes(
                         downloaded.load(Ordering::Relaxed),
                         Some(total_bytes),
                         segment_count,
-                    )?;
+                    ))?;
                 }
                 result = futures.next() => {
                     match result {
@@ -1181,11 +1203,11 @@ impl DownloadService {
                         }
                         None => break,
                     }
-                    on_progress(
+                    on_progress(DownloadProgress::bytes(
                         downloaded.load(Ordering::Relaxed),
                         Some(total_bytes),
                         segment_count,
-                    )?;
+                    ))?;
                 }
             }
         }
@@ -1264,6 +1286,81 @@ fn detect_browser_for_cookies() -> &'static str {
         }
     }
     "chrome"
+}
+
+// Read progress while the child is running. Blocking wait_with_output prevented
+// all live updates and kept the async task from responding to pause/cancel.
+async fn run_ytdlp(
+    command: Command,
+    on_progress: &mut impl FnMut(DownloadProgress) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    let mut child = tokio::process::Command::from(command)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("failed to start yt-dlp: {e}"))?;
+    let stdout = child.stdout.take().ok_or("yt-dlp stdout unavailable")?;
+    let mut stderr = child.stderr.take().ok_or("yt-dlp stderr unavailable")?;
+    let mut lines = BufReader::new(stdout).lines();
+    let mut errors = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let (mut stdout_open, mut stderr_open) = (true, true);
+    let mut path = None;
+    while stdout_open || stderr_open {
+        tokio::select! {
+            line = lines.next_line(), if stdout_open => {
+                match line.map_err(|e| format!("yt-dlp progress read failed: {e}"))? {
+                    Some(line) => {
+                        if let Some(progress) = parse_ytdlp_progress(&line) {
+                            on_progress(progress)?;
+                        } else if let Some(json) = line.strip_prefix("LDM_FILE:") {
+                            path = serde_json::from_str::<String>(json).ok().map(PathBuf::from);
+                        }
+                    }
+                    None => stdout_open = false,
+                }
+            }
+            count = stderr.read(&mut buffer), if stderr_open => {
+                let count = count.map_err(|e| format!("yt-dlp stderr read failed: {e}"))?;
+                stderr_open = count != 0;
+                errors.extend_from_slice(&buffer[..count]);
+                // Keep only the diagnostic tail, even on a very long download.
+                if errors.len() > 16 * 1024 { errors.drain(..errors.len() - 16 * 1024); }
+            }
+        }
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("failed to wait for yt-dlp: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "yt-dlp failed ({status}): {}",
+            String::from_utf8_lossy(&errors).trim()
+        ));
+    }
+    path.ok_or_else(|| "yt-dlp completed but did not report output file".to_string())
+}
+
+fn parse_ytdlp_progress(line: &str) -> Option<DownloadProgress> {
+    let value: serde_json::Value =
+        serde_json::from_str(line.strip_prefix("LDM_PROGRESS:")?).ok()?;
+    let number = |key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_f64())
+            .filter(|n| n.is_finite() && *n >= 0.0)
+            .map(|n| n as u64)
+    };
+    let downloaded_bytes = number("downloaded_bytes")?;
+    Some(DownloadProgress {
+        downloaded_bytes,
+        total_bytes: number("total_bytes")
+            .filter(|n| *n > 0)
+            .or_else(|| number("total_bytes_estimate").filter(|n| *n > 0)),
+        active_parts: 1,
+        speed_bytes_per_second: number("speed"),
+        eta_seconds: number("eta"),
+    })
 }
 
 fn clean_env_command(program: &str) -> Command {
@@ -1520,7 +1617,11 @@ fn derive_file_name(url: &Url, headers: &HeaderMap) -> String {
             url.path_segments()
                 .and_then(|mut segments| segments.next_back())
                 .filter(|name| !name.is_empty())
-                .map(|name| urlencoding::decode(name).unwrap_or_else(|_| name.into()).into_owned())
+                .map(|name| {
+                    urlencoding::decode(name)
+                        .unwrap_or_else(|_| name.into())
+                        .into_owned()
+                })
         })
         .map(|name| {
             if let Some(ref ext) = inferred_extension
@@ -2104,8 +2205,8 @@ mod segment_tests {
                 manifest,
                 None,
                 &mut |_started, _total, _count| Ok(()),
-                &mut |current, _total, _count| {
-                    published.push(current);
+                &mut |progress| {
+                    published.push(progress.downloaded_bytes);
                     Ok(())
                 },
             )
@@ -2239,5 +2340,144 @@ mod ytdlp_detection_tests {
                 "unrelated page must not be treated as a supported page: {page}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod live_progress_tests {
+    use super::*;
+
+    #[test]
+    fn ytdlp_progress_accepts_estimates_and_missing_measurements() {
+        let p = parse_ytdlp_progress(r#"LDM_PROGRESS:{"downloaded_bytes":100,"total_bytes":null,"total_bytes_estimate":1000,"speed":25.5,"eta":36}"#).unwrap();
+        assert_eq!(p.total_bytes, Some(1000));
+        assert_eq!(p.speed_bytes_per_second, Some(25));
+        assert_eq!(p.eta_seconds, Some(36));
+        let unknown =
+            parse_ytdlp_progress(r#"LDM_PROGRESS:{"downloaded_bytes":0,"speed":null,"eta":null}"#)
+                .unwrap();
+        assert_eq!(unknown.total_bytes, None);
+        assert_eq!(unknown.eta_seconds, None);
+        assert!(parse_ytdlp_progress("[download] normal log message").is_none());
+        assert!(parse_ytdlp_progress("LDM_PROGRESS:bad json").is_none());
+    }
+
+    #[tokio::test]
+    async fn ytdlp_publishes_before_exit_and_drains_stderr() {
+        let dir = std::env::temp_dir().join(format!("ldm-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ack = dir.join("ack");
+        let _ = std::fs::remove_file(&ack);
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(r#"
+            i=0; while [ "$i" -lt 2000 ]; do echo 'diagnostic diagnostic diagnostic diagnostic diagnostic' >&2; i=$((i+1)); done
+            printf '%s\n' 'LDM_PROGRESS:{"downloaded_bytes":128,"total_bytes":1024,"speed":256,"eta":3}'
+            while [ ! -f "$1" ]; do sleep 0.02; done
+            printf '%s\n' 'LDM_FILE:"/tmp/test video.mp4"'
+        "#).arg("ldm-test").arg(&ack).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut samples = Vec::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_ytdlp(command, &mut |p| {
+                samples.push(p);
+                std::fs::write(&ack, b"received").unwrap();
+                Ok(())
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, PathBuf::from("/tmp/test video.mp4"));
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].eta_seconds, Some(3));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ytdlp_cancel_stops_the_child() {
+        let pidfile = std::env::temp_dir().join(format!("ldm-child-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&pidfile);
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("echo $$ > \"$1\"; exec sleep 30")
+            .arg("ldm-test")
+            .arg(&pidfile)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(300),
+                run_ytdlp(command, &mut |_| Ok(()))
+            )
+            .await
+            .is_err()
+        );
+        let pid = std::fs::read_to_string(&pidfile).unwrap();
+        for _ in 0..40 {
+            if !Path::new(&format!("/proc/{}", pid.trim())).exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(!Path::new(&format!("/proc/{}", pid.trim())).exists());
+        std::fs::remove_file(pidfile).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a locally installed yt-dlp; uses only a localhost fixture"]
+    async fn real_ytdlp_reports_live_speed_and_eta() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut request = [0u8; 8192];
+                    let _ = socket.read(&mut request).await;
+                    let header = "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 2097152\r\nConnection: close\r\n\r\n";
+                    if socket.write_all(header.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    for _ in 0..128 {
+                        if socket.write_all(&[7u8; 16384]).await.is_err() {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                });
+            }
+        });
+        let target = std::env::temp_dir().join(format!("ldm-real-{}.mp4", std::process::id()));
+        let _ = std::fs::remove_file(&target);
+        let service = DownloadService::new(Client::new());
+        let url = Url::parse(&format!("http://{address}/video.mp4")).unwrap();
+        let mut live_samples = 0;
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            service.download_with_ytdlp(
+                &url,
+                &target,
+                Some("best"),
+                false,
+                &mut |_, _, _| Ok(()),
+                &mut |p| {
+                    if p.downloaded_bytes < 2097152
+                        && p.speed_bytes_per_second.unwrap_or(0) > 0
+                        && p.eta_seconds.is_some()
+                    {
+                        live_samples += 1;
+                    }
+                    Ok(())
+                },
+            ),
+        )
+        .await;
+        server.abort();
+        result.unwrap().unwrap();
+        assert!(live_samples >= 2, "missing live speed/ETA: {live_samples}");
+        assert_eq!(std::fs::read(&target).unwrap(), vec![7u8; 2097152]);
+        std::fs::remove_file(target).unwrap();
     }
 }

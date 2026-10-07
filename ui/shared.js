@@ -5,11 +5,11 @@ export const invoke = tauri?.core?.invoke ?? (async () => { throw new Error("Tau
 export const listen = tauri?.event?.listen ?? (async () => () => {});
 
 export const STATUS_LABELS = {
-  queued: "Added",
+  queued: "Queued",
   scheduled: "Scheduled",
   in_progress: "Downloading",
   paused: "Paused",
-  completed: "Finished",
+  completed: "Completed",
   failed: "Failed",
   cancelled: "Cancelled",
   receiving: "Receiving data",

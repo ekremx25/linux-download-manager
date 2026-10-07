@@ -2,7 +2,7 @@ use crate::browser::{
     acknowledge_staged_browser_request, load_staged_browser_requests,
     quarantine_staged_browser_request,
 };
-use crate::download::{DownloadOptions, DownloadService};
+use crate::download::{DownloadOptions, DownloadProgress, DownloadService};
 use crate::jobs::{DownloadJobRequest, queue_download_request};
 use crate::storage::Storage;
 use chrono::{DateTime, Utc};
@@ -546,17 +546,33 @@ async fn run_download(
         let storage = storage.clone_for_task();
         let app_handle = app_handle.clone();
         let speed_tracker = speed_tracker.clone();
-        move |downloaded_bytes: u64, total_bytes: Option<u64>, active_parts: usize| -> Result<(), String> {
+        let mut gate = ProgressGate::new();
+        move |progress: DownloadProgress| -> Result<(), String> {
+            // Disk/network chunks can arrive thousands of times a second. UI and
+            // SQLite need only a few snapshots; terminal states are always stored below.
+            if !gate.ready(Instant::now()) {
+                return Ok(());
+            }
+            let DownloadProgress {
+                downloaded_bytes,
+                total_bytes,
+                active_parts,
+                ..
+            } = progress;
             let (speed_bytes_per_second, eta_seconds) = {
                 let mut tracker = speed_tracker.lock().unwrap();
                 tracker.update(downloaded_bytes);
-                let speed = tracker.speed();
-                let eta = total_bytes.and_then(|total| {
-                    if speed > 0 && downloaded_bytes < total {
-                        Some((total - downloaded_bytes) / speed)
-                    } else {
-                        None
-                    }
+                let speed = progress
+                    .speed_bytes_per_second
+                    .unwrap_or_else(|| tracker.speed());
+                let eta = progress.eta_seconds.or_else(|| {
+                    total_bytes.or(total_hint).and_then(|total| {
+                        if speed > 0 && downloaded_bytes < total {
+                            Some((total - downloaded_bytes) / speed)
+                        } else {
+                            None
+                        }
+                    })
                 });
                 (Some(speed), eta)
             };
@@ -712,6 +728,25 @@ pub fn send_download_notification(app_handle: &AppHandle, title: &str, body: Str
         .show();
 }
 
+struct ProgressGate {
+    last: Option<Instant>,
+}
+impl ProgressGate {
+    fn new() -> Self {
+        Self { last: None }
+    }
+    fn ready(&mut self, now: Instant) -> bool {
+        if self
+            .last
+            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(1))
+        {
+            return false;
+        }
+        self.last = Some(now);
+        true
+    }
+}
+
 struct SpeedTracker {
     last_bytes: u64,
     last_time: Instant,
@@ -734,6 +769,10 @@ impl SpeedTracker {
     }
 
     fn update(&mut self, bytes: u64) {
+        if bytes < self.last_bytes {
+            self.reset(bytes);
+            return;
+        }
         let elapsed = self.last_time.elapsed();
         if elapsed >= Duration::from_secs(1) {
             let delta = bytes.saturating_sub(self.last_bytes);
@@ -994,5 +1033,28 @@ mod pause_tests {
         assert!(library::ensure_library(&library_base).is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod progress_rate_tests {
+    use super::*;
+    #[test]
+    fn thousands_of_chunks_do_not_create_thousands_of_database_writes() {
+        let mut gate = ProgressGate::new();
+        let start = Instant::now();
+        let updates = (0..10000)
+            .filter(|i| gate.ready(start + Duration::from_micros(i * 100)))
+            .count();
+        assert_eq!(updates, 1); // one second of traffic, one UI/database snapshot
+    }
+    #[test]
+    fn switching_from_video_to_audio_resets_measured_speed() {
+        let mut tracker = SpeedTracker::new();
+        tracker.reset(10000);
+        tracker.speed = 5000;
+        tracker.update(100);
+        assert_eq!(tracker.speed(), 0);
+        assert_eq!(tracker.last_bytes, 100);
     }
 }

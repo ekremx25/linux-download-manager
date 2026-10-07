@@ -305,3 +305,18 @@ pub async fn system_status(state: State<'_, AppState>) -> Result<SystemStatus, S
         default_download_dir: state.default_download_dir.display().to_string(),
     })
 }
+
+/// Reveal a record's containing folder; never execute the downloaded file.
+#[tauri::command]
+pub fn open_download_folder(state: State<'_, AppState>, id: Option<i64>) -> Result<(), String> {
+    let folder = if let Some(id) = id {
+        let record = state.storage.get_download(id)?;
+        std::path::Path::new(&record.save_path).parent()
+            .ok_or("The save folder could not be found")?.to_path_buf()
+    } else { state.default_download_dir.clone() };
+    if !folder.is_dir() { return Err("The save folder does not exist or has been moved.".into()); }
+    std::process::Command::new("xdg-open").arg(&folder)
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .spawn().map_err(|e| format!("Could not open folder: {e}"))?;
+    Ok(())
+}

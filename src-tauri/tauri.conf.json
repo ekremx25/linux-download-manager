@@ -14,38 +14,44 @@
     "windows": [
       {
         "label": "main",
-        "title": "Linux Download Manager Custom",
+        "title": "Linux Download Manager",
         "url": "index.html",
         "width": 1200,
         "height": 820,
-        "minWidth": 980,
-        "minHeight": 700,
+        "minWidth": 760,
+        "minHeight": 580,
         "resizable": true,
         "visible": false
       },
       {
         "label": "add-download",
-        "title": "Add Download",
+        "title": "Add download",
         "url": "add-download.html",
-        "width": 560,
-        "height": 340,
-        "resizable": false,
-        "visible": false
+        "width": 620,
+        "height": 720,
+        "resizable": true,
+        "visible": false,
+        "minWidth": 480,
+        "minHeight": 460
       },
       {
         "label": "download-detail",
-        "title": "Download Details",
+        "title": "Download details",
         "url": "download-detail.html",
-        "width": 640,
-        "height": 460,
+        "width": 680,
+        "height": 740,
         "resizable": true,
-        "visible": false
+        "visible": false,
+        "minWidth": 520,
+        "minHeight": 460
       }
     ]
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage"],
+    "targets": [
+      "appimage"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",

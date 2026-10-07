@@ -1,5 +1,7 @@
 /target
-Cargo.lock
-**/*.tmp
-**/*.log
-.DS_Store
+*.db
+*.db-shm
+*.db-wal
+src-tauri/gen
+
+/dist/

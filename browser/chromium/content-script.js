@@ -58,6 +58,7 @@ let reportTimer = null;
 let recentMediaCandidates = [];
 let mediaOverlayRoot = null;
 let mediaRefreshTimer = null;
+let mediaScanTimer = null;
 let toastRoot = null;
 let toastTimer = null;
 let captureTimeout = null;
@@ -74,11 +75,12 @@ function disconnectExtension() {
   window.clearInterval(periodicRefreshHandle);
   window.clearTimeout(reportTimer);
   window.clearTimeout(mediaRefreshTimer);
+  window.clearTimeout(mediaScanTimer);
   clearCaptureTimeout();
   pageObserver?.disconnect();
   hoverButton?.remove();
   mediaOverlayRoot?.remove();
-  showToast("Eklenti yenilendi. Bu video sayfasını da yenileyin.", "info");
+  showToast("The extension was reloaded. Please reload this video page too.", "info");
 }
 
 function sendExtensionMessage(message, callback) {
@@ -99,7 +101,7 @@ function sendExtensionMessage(message, callback) {
       return;
     }
     clearCaptureTimeout();
-    showToast("Eklenti mesajı gönderilemedi: " + error.message, "error");
+    showToast("Could not send the extension message: " + error.message, "error");
   }
 }
 
@@ -125,6 +127,15 @@ function bootstrap() {
     return;
   }
 
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      detectLocationChange();
+      scheduleCandidateReport();
+      scheduleMediaRefresh();
+      if (window === window.top) scheduleMediaOverlayRefresh();
+    }
+  });
+
   // Embedded players run this script too so their media can still be reported,
   // but only the top-level page should render controls. Otherwise every iframe
   // adds its own LDM button over the same visible player.
@@ -132,7 +143,7 @@ function bootstrap() {
     scheduleCandidateReport();
     observePageChanges();
     reportObservedMediaCandidates();
-    periodicRefreshHandle = window.setInterval(reportObservedMediaCandidates, 1200);
+    periodicRefreshHandle = window.setInterval(() => { if (!document.hidden) reportObservedMediaCandidates(); }, 5000);
     document.addEventListener("loadedmetadata", handleMediaSignal, true);
     document.addEventListener("play", handleMediaSignal, true);
     return;
@@ -297,7 +308,7 @@ function showQualityPicker(candidate, anchorElement) {
     color: #86e8ff !important;
     letter-spacing: 0.04em !important;
   `);
-  title.textContent = "Kalite Seçin";
+  title.textContent = "Choose quality";
   picker.appendChild(title);
 
   for (const quality of qualities) {
@@ -538,8 +549,19 @@ function isEventInsideActiveCandidate(event) {
   );
 }
 
+function isExtensionMutation(record) {
+  const owned = node => Boolean((node?.nodeType === 1 ? node : node?.parentElement)?.closest?.(
+    '.ldm-media-layer, .ldm-hover-button, .ldm-toast-root, .ldm-site-btn, #ldm-yt-download-btn'
+  ));
+  if (owned(record.target)) return true;
+  const changed = [...(record.addedNodes || []), ...(record.removedNodes || [])];
+  return record.type === 'childList' && changed.length > 0 && changed.every(owned);
+}
+
 function observePageChanges() {
-  const observer = pageObserver = new MutationObserver(() => {
+  const observer = pageObserver = new MutationObserver(records => {
+    // Updating our own overlay must not trigger another overlay update forever.
+    if (document.hidden || records.every(isExtensionMutation)) return;
     detectLocationChange();
     scheduleCandidateReport();
     scheduleMediaRefresh();
@@ -599,45 +621,46 @@ function startPeriodicRefresh() {
   }
 
   periodicRefreshHandle = window.setInterval(() => {
+    if (document.hidden) return;
     detectLocationChange();
     scheduleMediaRefresh();
     scheduleMediaOverlayRefresh();
-  }, 1200);
+  }, 5000);
 }
 
 function scheduleMediaRefresh() {
-  if (extensionDisconnected) return;
-  window.setTimeout(() => {
+  // A busy social feed may mutate hundreds of times per second. Keep one
+  // pending scan, rather than scheduling a full document scan per mutation.
+  if (extensionDisconnected || document.hidden || mediaScanTimer !== null) return;
+  mediaScanTimer = window.setTimeout(() => {
+    mediaScanTimer = null;
+    if (extensionDisconnected || document.hidden) return;
     reportObservedMediaCandidates();
     refreshRecentMediaCandidates();
-  }, 180);
+  }, 1000);
 }
 
 function scheduleMediaOverlayRefresh() {
-  if (extensionDisconnected) return;
-  if (mediaRefreshTimer) {
-    window.clearTimeout(mediaRefreshTimer);
-  }
+  if (extensionDisconnected || document.hidden || mediaRefreshTimer) return;
 
   mediaRefreshTimer = window.setTimeout(() => {
     mediaRefreshTimer = null;
+    if (extensionDisconnected || document.hidden) return;
     refreshMediaOverlay();
-  }, 120);
+  }, 1000);
 }
 
 function scheduleCandidateReport() {
-  if (extensionDisconnected) return;
-  if (reportTimer) {
-    window.clearTimeout(reportTimer);
-  }
+  if (extensionDisconnected || document.hidden || reportTimer) return;
 
   reportTimer = window.setTimeout(() => {
     reportTimer = null;
+    if (extensionDisconnected || document.hidden) return;
     sendExtensionMessage({
       type: "candidate-count",
       count: countCandidates()
     });
-  }, 120);
+  }, 1000);
 }
 
 function countCandidates() {
@@ -769,7 +792,7 @@ function refreshMediaOverlay() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "ldm-media-button";
-    button.textContent = "⬇ LDM İndir";
+    button.textContent = "⬇ LDM Download";
     if (target.pinned) {
       // Without a player anchor, a floating button could cover the video.
       continue;
@@ -824,7 +847,7 @@ function injectRedditButtons() {
 
     const btn = document.createElement("div");
     btn.className = "ldm-site-btn";
-    btn.textContent = "⬇ LDM İndir";
+    btn.textContent = "⬇ LDM Download";
     btn.setAttribute("style", `
       display: block !important;
       z-index: 2147483647 !important;
@@ -913,7 +936,7 @@ function injectRedditButtons() {
           showToast("Download sent to Linux Download Manager", "success");
         });
       } else {
-        showToast("Video URL bulunamadı.", "error");
+        showToast("Video URL not found.", "error");
       }
     }, true);
 

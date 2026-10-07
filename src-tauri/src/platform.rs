@@ -238,13 +238,13 @@ fn install_browser_extension(exe_dir: &Path, app_data: &Path, home: &str) {
     // Show a proper modal dialog (zenity → kdialog → notify-send fallback)
     // with the exact path the user has to pick in 'Load unpacked'.
     let message = format!(
-        "Linux Download Manager kuruldu.\n\n\
-        Tarayıcı eklentisini yüklemek için:\n\n\
-        1. Açılan chrome://extensions sayfasında sağ üstten \
-        \"Geliştirici modu\" / \"Developer mode\"'u açın\n\n\
-        2. \"Paketlenmemiş öğe yükle\" / \"Load unpacked\" butonuna tıklayın\n\n\
-        3. Şu klasörü seçin:\n   {}\n\n\
-        (Bu klasör Documents altındadır; silmeyin, uygulama bu konuma bağlı.)",
+        "Linux Download Manager is installed.\n\n\
+        To install the browser extension:\n\n\
+        1. On the chrome://extensions page that just opened, turn on \
+        \"Developer mode\" in the top right corner\n\n\
+        2. Click \"Load unpacked\"\n\n\
+        3. Select this folder:\n   {}\n\n\
+        (This folder lives under Documents; do not delete it, the app depends on it.)",
         ext_dest.display()
     );
 

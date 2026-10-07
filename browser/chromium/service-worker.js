@@ -94,7 +94,7 @@ chrome.action.onClicked.addListener((tab) => {
   if (payload?.ok) {
     queueNativeCapture(payload.capture, tab?.id);
   } else {
-    notifyTab(tab?.id, "error", payload?.error ?? "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin.");
+    notifyTab(tab?.id, "error", payload?.error ?? "The video stream could not be captured yet. Reload the page, play the video, and try again.");
   }
 });
 
@@ -118,7 +118,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     if (payload?.ok) {
       queueNativeCapture(payload.capture, tab?.id);
     } else {
-      notifyTab(tab?.id, "error", payload?.error ?? "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin.");
+      notifyTab(tab?.id, "error", payload?.error ?? "The video stream could not be captured yet. Reload the page, play the video, and try again.");
     }
     return;
   }
@@ -209,7 +209,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!payload?.ok) {
       sendResponse({
         ok: false,
-        error: payload?.error ?? "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin."
+        error: payload?.error ?? "The video stream could not be captured yet. Reload the page, play the video, and try again."
       });
       try { saveCaptureDiagnostic(tabId, sender.tab?.url); }
       catch (error) { console.warn("LDM diagnostic export failed", error); }
@@ -848,7 +848,7 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
     }
     return {
       ok: false,
-      error: "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin."
+      error: "The video stream could not be captured yet. Reload the page, play the video, and try again."
     };
   }
 
@@ -894,7 +894,7 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
     }
     return {
       ok: false,
-      error: "Video akışı henüz yakalanamadı. Sayfayı yenileyip videoyu oynatın, ardından tekrar deneyin."
+      error: "The video stream could not be captured yet. Reload the page, play the video, and try again."
     };
   }
 

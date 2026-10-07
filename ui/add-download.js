@@ -1,6 +1,6 @@
 import {isTauri,invoke,formatBytes,setNotice} from './shared.js';
 const $=id=>document.getElementById(id);
-function focusUrl(){try{const input=$('url');if(input&&!input.disabled)input.forceActiveFocus();}catch{}}
+function focusUrl(){try{const input=$('url');if(input&&!input.disabled)input.focus();}catch{}}
 let metadata=null, inspectedUrl='', generation=0, submitting=false;
 document.addEventListener('DOMContentLoaded',async()=>{
   bind();
@@ -8,14 +8,14 @@ document.addEventListener('DOMContentLoaded',async()=>{
   const settings=await invoke('app_settings').catch(()=>null);
   if(settings)$('save-dir').placeholder=settings.defaultDownloadDir;
 });
-function invalidate(){generation++;metadata=null;inspectedUrl='';$('metadata').hidden=true;$('file-name').value='';setBusy(false,'Inspect');}
+function invalidate(){generation++;metadata=null;inspectedUrl='';$('metadata').hidden=true;$('file-name').value='';setBusy(false,'Check link');}
 function bind(){
   $('close').onclick=$('cancel').onclick=closeWindow;
   document.addEventListener('keydown',event=>{if(event.key==='Escape')closeWindow();});
   $('url').oninput=invalidate;
-  $('paste').onclick=async()=>{const version=generation;try{const text=await navigator.clipboard.readText();if(submitting||version!==generation)return;$('url').value=text;invalidate();}catch{setNotice($('add-notice'),'Clipboard access was denied.','error');}};
+  $('paste').onclick=async()=>{const version=generation;try{const text=await navigator.clipboard.readText();if(submitting||version!==generation)return;$('url').value=text;invalidate();}catch{setNotice($('add-notice'),'Clipboard access was denied. Use Ctrl+V to paste.','error');}};
   $('choose-dir').onclick=chooseDir;$('inspect').onclick=inspect;$('download').onclick=start;
-  $('enqueue-only').onchange=()=>{$('download').textContent=$('enqueue-only').checked?'Add to queue':$('schedule').value?'Schedule download':'Download now';};
+  $('enqueue-only').onchange=()=>{$('download').textContent=$('enqueue-only').checked?'Add to queue':$('schedule').value?'Schedule':'Start download';};
   $('schedule').oninput=$('enqueue-only').onchange;
   $('url').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();inspect();}};
 }
@@ -24,25 +24,25 @@ async function chooseDir(){try{const path=await invoke('pick_save_directory');if
 async function inspect(){
   if(submitting)return;
   const url=$('url').value.trim();invalidate();
-  if(!url){setNotice($('add-notice'),'Enter a download URL.','error');return;}
-  const version=generation;setBusy(true,'Inspecting…');
+  if(!url){setNotice($('add-notice'),'Enter a video or file URL.','error');return;}
+  const version=generation;setBusy(true,'Checking…');
   try{
     const result=await invoke('inspect_url',{url});
     if(version!==generation||url!==$('url').value.trim())return;
     metadata=result;inspectedUrl=url;$('file-name').value=result.suggestedFileName;
     $('meta-size').textContent=result.contentLength==null?'Unknown':formatBytes(result.contentLength);
     $('meta-type').textContent=result.contentType||'Unknown';$('meta-resume').textContent=result.resumable?'Yes':'No';
-    $('metadata').hidden=false;$('download').disabled=false;setNotice($('add-notice'),'Link is ready to download.');
+    $('metadata').hidden=false;$('download').disabled=false;setNotice($('add-notice'),'The link is ready. You can start downloading.');
   }catch(error){if(version===generation)setNotice($('add-notice'),String(error),'error');}
-  finally{if(version===generation)setBusy(false,'Inspect');}
+  finally{if(version===generation)setBusy(false,'Check link');}
 }
-function setBusy(busy,label){$('inspect').disabled=busy;$('inspect').textContent=label;$('download').disabled=busy;focusUrl();}
+function setBusy(busy,label){$('inspect').disabled=busy;$('inspect').textContent=label;$('download').disabled=busy||!$('url').value.trim();focusUrl();}
 async function start(){
   const url=$('url').value.trim();
   if(submitting||!url)return;
   if(!metadata||url!==inspectedUrl){await inspect();if(!metadata||url!==inspectedUrl)return;}
   const fileName=$('file-name').value.trim();
-  if(!fileName||fileName==='.'||fileName==='..'||/[\\/\x00-\x1f\x7f:*?"<>|]/.test(fileName)){setNotice($('add-notice'),'Enter a file name without path separators or reserved characters.','error');return;}
+  if(!fileName||fileName==='.'||fileName==='..'||/[\\/\x00-\x1f\x7f:*?"<>|]/.test(fileName)){setNotice($('add-notice'),'Use a file name without path separators or reserved characters.','error');return;}
   submitting=true;generation++;
   const controls=['url','paste','save-dir','choose-dir','file-name','checksum','schedule','bandwidth','enqueue-only','inspect','download','cancel','close'];
   controls.forEach(id=>$(id).disabled=true);$('download').textContent='Adding…';

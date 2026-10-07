@@ -147,7 +147,7 @@ fn ensure_desktop_app_running() -> Result<(), String> {
     }
 
     let desktop_binary = desktop_binary_path()?;
-    Command::new(&desktop_binary).spawn().map_err(|error| {
+    Command::new(&desktop_binary).arg("--background").spawn().map_err(|error| {
         format!(
             "failed to launch desktop application {}: {error}",
             desktop_binary.display()
