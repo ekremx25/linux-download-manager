@@ -631,23 +631,25 @@ impl DownloadService {
             "sec-fetch-mode",
             "sec-fetch-site",
         ]
-            .iter()
-            .filter_map(|name| {
-                http_headers
-                    .get(*name)
-                    .map(|value| format!("{name}: {value}\r\n"))
-            })
-            .collect::<String>();
+        .iter()
+        .filter_map(|name| {
+            http_headers
+                .get(*name)
+                .map(|value| format!("{name}: {value}\r\n"))
+        })
+        .collect::<String>();
         let mut last_error = None;
 
         // Some HLS providers publish the playlist a moment after playback starts.
         // A short retry turns their transient 404 into a normal download.
         'playlists: for playlist_url in playlist_urls {
-            for attempt in 0..4 {
-            if attempt > 0 {
-                let _ = fs::remove_file(&temp_path).await;
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
+            let mut attempt = 0;
+            let mut repair_audio = false;
+            loop {
+                if attempt > 0 || repair_audio {
+                    let _ = fs::remove_file(&temp_path).await;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
 
                 let mut command = Command::new("ffmpeg");
                 command
@@ -683,20 +685,20 @@ impl DownloadService {
                         .arg("-seg_max_retry")
                         .arg("5");
                 }
+                command
+                    .arg("-allowed_extensions")
+                    .arg("ALL")
+                    .arg("-rw_timeout")
+                    .arg("15000000")
+                    .arg("-i")
+                    .arg(playlist_url.as_str())
+                    .arg("-map")
+                    .arg("0:v?")
+                    .arg("-map")
+                    .arg("0:a?");
+                configure_stream_codecs(&mut command, repair_audio);
                 let mut child = KillOnDropChild::new(
                     command
-                        .arg("-allowed_extensions")
-                        .arg("ALL")
-                        .arg("-rw_timeout")
-                        .arg("15000000")
-                        .arg("-i")
-                        .arg(playlist_url.as_str())
-                        .arg("-map")
-                        .arg("0:v?")
-                        .arg("-map")
-                        .arg("0:a?")
-                        .arg("-c")
-                        .arg("copy")
                         .arg("-movflags")
                         .arg("+faststart")
                         .arg("-f")
@@ -710,16 +712,16 @@ impl DownloadService {
                         })?,
                 );
 
-            // FFmpeg can emit many transient network errors while an HLS stream is
-            // running. Drain stderr concurrently so a full OS pipe cannot block the
-            // downloader indefinitely.
-            let stderr_reader = child.take_stderr().map(|mut stderr| {
-                std::thread::spawn(move || {
-                    let mut bytes = Vec::new();
-                    let _ = stderr.read_to_end(&mut bytes);
-                    bytes
-                })
-            });
+                // FFmpeg can emit many transient network errors while an HLS stream is
+                // running. Drain stderr concurrently so a full OS pipe cannot block the
+                // downloader indefinitely.
+                let stderr_reader = child.take_stderr().map(|mut stderr| {
+                    std::thread::spawn(move || {
+                        let mut bytes = Vec::new();
+                        let _ = stderr.read_to_end(&mut bytes);
+                        bytes
+                    })
+                });
 
                 let attempt_error = loop {
                     match child.try_wait() {
@@ -757,12 +759,17 @@ impl DownloadService {
                         break 'playlists;
                     }
                     Some(error) => {
+                        if !repair_audio && needs_aac_repair(&error) {
+                            repair_audio = true;
+                            continue;
+                        }
                         let retryable = error.contains("404 Not Found")
                             || error.contains("Server returned 5")
                             || error.contains("Connection timed out")
                             || error.contains("Connection reset");
                         last_error = Some(error);
-                        if !retryable {
+                        attempt += 1;
+                        if !retryable || attempt >= 4 {
                             break;
                         }
                     }
@@ -1723,6 +1730,55 @@ fn infer_extension(url: &Url, headers: &HeaderMap) -> Option<String> {
 
 fn validate_url(raw_url: &str) -> Result<Url, String> {
     Url::parse(raw_url).map_err(|error| format!("invalid URL: {error}"))
+}
+
+// Keep the video bitstream intact. Only repair AAC after the MP4 muxer rejects
+// its ADTS headers; normal downloads retain lossless, low-CPU stream copying.
+fn needs_aac_repair(error: &str) -> bool {
+    error.contains("aac_adtstoasc") && error.contains("Error parsing ADTS frame header")
+}
+
+fn configure_stream_codecs(command: &mut Command, repair_audio: bool) {
+    command.args(["-c", "copy"]);
+    if repair_audio {
+        command.args(["-c:a", "aac", "-b:a", "192k", "-threads:a", "1"]);
+    }
+}
+
+#[cfg(test)]
+mod aac_repair_tests {
+    use super::*;
+
+    #[test]
+    fn repair_is_limited_to_the_observed_adts_failure() {
+        assert!(needs_aac_repair(
+            "[aac_adtstoasc] Error parsing ADTS frame header!"
+        ));
+        assert!(!needs_aac_repair("404 Not Found"));
+        assert!(!needs_aac_repair("Error muxing a packet"));
+    }
+
+    #[test]
+    fn audio_repair_preserves_video_copy_and_bounds_audio_threads() {
+        let mut command = Command::new("ffmpeg");
+        configure_stream_codecs(&mut command, false);
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["-c", "copy"]);
+        let mut command = Command::new("ffmpeg");
+        configure_stream_codecs(&mut command, true);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "-c",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-threads:a",
+                "1"
+            ]
+        );
+    }
 }
 
 fn ensure_ffmpeg_available() -> Result<(), String> {

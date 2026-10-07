@@ -137,6 +137,8 @@ Speed and ETA refer to the current transfer. For video downloads, extraction, se
 
 Progress notifications and database snapshots are limited to once per second. Hidden app windows avoid live repainting, and the extension skips background-tab scans. These measures reduce unnecessary work without imposing a transfer speed cap. Brief CPU spikes can still occur when yt-dlp starts, extracts video information, or FFmpeg combines streams.
 
+If an HLS download fails specifically because MP4 rejects its AAC ADTS headers, the app retries that stream with audio converted to AAC at 192 kb/s using one audio thread. Video remains stream-copied; ordinary downloads still copy both streams. This recovery restarts the transfer and may take longer.
+
 ## Updating
 
 From a clean source checkout with a configured tracking branch:
