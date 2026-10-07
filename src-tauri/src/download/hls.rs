@@ -75,6 +75,86 @@ fn parse(text: &str, base: &Url) -> Option<(String, Vec<Url>)> {
     (!urls.is_empty() && !duration_pending).then_some((local, urls))
 }
 
+// Only self-contained renditions can be prefetched as one media playlist.
+// Separate audio/subtitles and unknown master features stay with FFmpeg.
+fn master_variant(text: &str, base: &Url) -> Option<Url> {
+    if !text.trim_start().starts_with("#EXTM3U") {
+        return None;
+    }
+    let mut pending = None;
+    let mut variants = Vec::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some(attrs) = line.strip_prefix("#EXT-X-STREAM-INF:") {
+            if pending.is_some() {
+                return None;
+            }
+            let fields: Vec<_> = attrs.split(',').map(str::trim).collect();
+            if fields.iter().any(|f| {
+                f.starts_with("AUDIO=")
+                    || f.starts_with("VIDEO=")
+                    || f.starts_with("SUBTITLES=")
+                    || f.starts_with("CLOSED-CAPTIONS=\"")
+            }) {
+                return None;
+            }
+            pending = Some(
+                fields
+                    .iter()
+                    .find_map(|f| f.strip_prefix("BANDWIDTH="))?
+                    .parse::<u64>()
+                    .ok()?,
+            );
+        } else if line.starts_with('#') {
+            if !["#EXTM3U", "#EXT-X-VERSION", "#EXT-X-INDEPENDENT-SEGMENTS"]
+                .contains(&line.split(':').next()?)
+            {
+                return None;
+            }
+        } else {
+            let bandwidth = pending.take()?;
+            let url = base.join(line).ok()?;
+            if !matches!(url.scheme(), "http" | "https") {
+                return None;
+            }
+            variants.push((bandwidth, url));
+        }
+    }
+    if pending.is_some() {
+        return None;
+    }
+    variants
+        .into_iter()
+        .max_by_key(|(bandwidth, _)| *bandwidth)
+        .map(|(_, url)| url)
+}
+
+async fn fetch_playlist(
+    client: &Client,
+    url: &Url,
+    credential_origin: &Url,
+    headers: &HashMap<String, String>,
+    referer: Option<&str>,
+) -> Option<(Url, String)> {
+    let response = request(client, url, credential_origin, headers, referer)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let base = response.url().clone();
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if body.len() + chunk.len() > PLAYLIST_LIMIT {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some((base, String::from_utf8(body).ok()?))
+}
+
 fn request(
     client: &Client,
     url: &Url,
@@ -108,25 +188,27 @@ pub(super) async fn prepare(
     referer: Option<&str>,
     progress: &mut impl FnMut(DownloadProgress) -> Result<(), String>,
 ) -> Result<Option<Prepared>, String> {
-    // A probe failure must leave existing FFmpeg retries available.
-    let response = match request(client, url, url, headers, referer).send().await {
-        Ok(r) if r.status().is_success() => r,
-        _ => return Ok(None),
-    };
-    let base = response.url().clone();
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let Ok(chunk) = chunk else { return Ok(None) };
-        if body.len() + chunk.len() > PLAYLIST_LIMIT {
+    // Resolve a bounded master chain; unsupported media still uses FFmpeg.
+    let mut next = url.clone();
+    let mut visited = std::collections::HashSet::new();
+    let mut media = None;
+    for _ in 0..4 {
+        if !visited.insert(next.clone()) {
             return Ok(None);
         }
-        body.extend_from_slice(&chunk);
+        let Some((base, text)) = fetch_playlist(client, &next, url, headers, referer).await else {
+            return Ok(None);
+        };
+        if let Some((local, urls)) = parse(&text, &base) {
+            media = Some((base, text, local, urls));
+            break;
+        }
+        let Some(variant) = master_variant(&text, &base) else {
+            return Ok(None);
+        };
+        next = variant;
     }
-    let Ok(text) = std::str::from_utf8(&body) else {
-        return Ok(None);
-    };
-    let Some((local, urls)) = parse(text, &base) else {
+    let Some((base, text, local, urls)) = media else {
         return Ok(None);
     };
     let cache = cache_path(target);
@@ -139,10 +221,11 @@ pub(super) async fn prepare(
     let bytes = Arc::new(AtomicU64::new(0));
     let count = urls.len();
     let mut completed = 0usize;
+    let credential_origin = url.clone();
     let jobs = futures_util::stream::iter(urls.into_iter().enumerate().map(|(index, url)| {
         let folder = folder.clone();
         let bytes = bytes.clone();
-        let base = base.clone();
+        let credential_origin = credential_origin.clone();
         async move {
             let output = folder.join(format!("segment-{index}.ts"));
             if let Ok(meta) = fs::metadata(&output).await {
@@ -154,7 +237,7 @@ pub(super) async fn prepare(
             let part = folder.join(format!("segment-{index}.tmp"));
             for attempt in 0..3 {
                 let result = async {
-                    let response = request(client, &url, &base, headers, referer)
+                    let response = request(client, &url, &credential_origin, headers, referer)
                         .send()
                         .await
                         .map_err(|e| e.to_string())?
@@ -216,10 +299,56 @@ pub(super) async fn prepare(
 mod tests {
     use super::*;
     #[test]
+    fn master_selection_preserves_external_tracks_and_rejects_unsafe_sources() {
+        let base = Url::parse("https://example.com/hls/master").unwrap();
+        let text = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100\nlow/list.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=200,CODECS=\"avc1,mp4a\"\nhigh/list.m3u8\n";
+        assert_eq!(
+            master_variant(text, &base).unwrap().as_str(),
+            "https://example.com/hls/high/list.m3u8"
+        );
+        assert!(
+            master_variant(
+                &text.replace("BANDWIDTH=100", "BANDWIDTH=100,AUDIO=\"audio\""),
+                &base
+            )
+            .is_none()
+        );
+        assert!(
+            master_variant(&format!("#EXT-X-MEDIA:TYPE=AUDIO,URI=audio\n{text}"), &base).is_none()
+        );
+        assert!(
+            master_variant(&text.replace("low/list.m3u8", "file:///tmp/secret"), &base).is_none()
+        );
+        assert!(master_variant("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100", &base).is_none());
+    }
+
+    #[test]
+    fn master_child_requests_do_not_forward_cross_origin_credentials() {
+        let client = Client::new();
+        let base = Url::parse("https://example.com/master").unwrap();
+        let child = Url::parse("https://cdn.example.com/media").unwrap();
+        let headers = HashMap::from([
+            ("cookie".into(), "private".into()),
+            ("authorization".into(), "Bearer test".into()),
+        ]);
+        let req = request(&client, &child, &base, &headers, None)
+            .build()
+            .unwrap();
+        assert!(!req.headers().contains_key("cookie"));
+        assert!(!req.headers().contains_key("authorization"));
+        let req = request(&client, &base, &base, &headers, None)
+            .build()
+            .unwrap();
+        assert!(req.headers().contains_key("cookie"));
+    }
+
+    #[test]
     fn legacy_cache_hint_does_not_disable_parallel_downloads() {
         let url = Url::parse("https://example.com/playlist").unwrap();
         for value in ["YES", "NO"] {
-            let text = format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-ALLOW-CACHE:{value}\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:10,\npart.ts\n#EXT-X-ENDLIST\n");
+            let text = format!(
+                "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-ALLOW-CACHE:{value}\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:10,\npart.ts\n#EXT-X-ENDLIST\n"
+            );
             let (_, urls) = parse(&text, &url).expect("legacy HLS cache hints must allow prefetch");
             assert_eq!(urls.len(), 1);
             assert!(parse(&text.replace("#EXT-X-ENDLIST", ""), &url).is_none());
@@ -291,6 +420,8 @@ mod integration_tests {
                         let n = socket.read(&mut input).unwrap_or(0);
                         let header = String::from_utf8_lossy(&input[..n]);
                         let body = if header.starts_with("GET /playlist.m3u8 ") {
+                            b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nmedia.m3u8\n".to_vec()
+                        } else if header.starts_with("GET /media.m3u8 ") {
                             format!(
                                 "#EXTM3U\n#EXT-X-ALLOW-CACHE:YES\n#EXT-X-TARGETDURATION:1\n{}#EXT-X-ENDLIST\n",
                                 (0..8)

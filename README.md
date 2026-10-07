@@ -137,13 +137,15 @@ The default concurrency is **3 downloads**, the default speed limit is **unlimit
 ### Faster HLS downloads
 
 Plain, finite HLS media playlists can download up to four segments in parallel.
+Self-contained master playlists are followed to the highest-bandwidth rendition;
+relative child URLs are resolved against the playlist that contains them.
 Completed segments are cached locally, then FFmpeg creates the MP4. If AAC audio
 needs repair, the retry uses the cached video instead of downloading it again.
 The transfer estimate is based on completed segment sizes; final processing can
 continue after the network transfer reaches 100%.
 
-Live, encrypted, master and other complex playlists keep the existing FFmpeg
-path. Speed depends on the source server. The cache temporarily needs extra disk
+Live, encrypted and other complex playlists keep the existing FFmpeg
+path, including master playlists that reference separate audio or subtitle tracks. Speed depends on the source server. The cache temporarily needs extra disk
 space alongside the output; it is removed after successful processing or explicit
 cancellation. Pausing preserves completed segments for the same playlist.
 
