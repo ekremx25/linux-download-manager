@@ -1,3 +1,4 @@
+mod hls;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use reqwest::header::{
@@ -643,6 +644,15 @@ impl DownloadService {
         // Some HLS providers publish the playlist a moment after playback starts.
         // A short retry turns their transient 404 into a normal download.
         'playlists: for playlist_url in playlist_urls {
+            let prepared = hls::prepare(
+                &self.client,
+                playlist_url,
+                target_path,
+                http_headers,
+                source_page_url,
+                on_progress,
+            )
+            .await?;
             let mut attempt = 0;
             let mut repair_audio = false;
             loop {
@@ -652,50 +662,51 @@ impl DownloadService {
                 }
 
                 let mut command = Command::new("ffmpeg");
-                command
-                    .arg("-y")
-                    .arg("-nostdin")
-                    .arg("-loglevel")
-                    .arg("error")
-                    .arg("-user_agent")
-                    .arg(user_agent)
-                    .arg("-reconnect")
-                    .arg("1")
-                    .arg("-reconnect_streamed")
-                    .arg("1")
-                    .arg("-reconnect_delay_max")
-                    .arg("5");
-                if let Some(referer) = referer.as_ref() {
-                    command.arg("-referer").arg(referer.as_str());
+                command.args(["-y", "-nostdin", "-loglevel", "error"]);
+                if prepared.is_none() {
+                    command.args([
+                        "-user_agent",
+                        user_agent,
+                        "-reconnect",
+                        "1",
+                        "-reconnect_streamed",
+                        "1",
+                        "-reconnect_delay_max",
+                        "5",
+                    ]);
+                    if let Some(referer) = referer.as_ref() {
+                        command.arg("-referer").arg(referer.as_str());
+                    }
+                    if !forwarded_headers.is_empty() {
+                        command.arg("-headers").arg(&forwarded_headers);
+                    }
                 }
-                if !forwarded_headers.is_empty() {
-                    command.arg("-headers").arg(&forwarded_headers);
+                if prepared.is_some() || !playlist_url.path().to_ascii_lowercase().ends_with(".mpd")
+                {
+                    command.args([
+                        "-f",
+                        "hls",
+                        "-allowed_segment_extensions",
+                        "ALL",
+                        "-extension_picky",
+                        "0",
+                        "-seg_max_retry",
+                        "5",
+                    ]);
                 }
-                // DASH does not accept the HLS demuxer's segment options.
-                if !playlist_url.path().to_ascii_lowercase().ends_with(".mpd") {
-                    command
-                        // Captured HLS playlists can have extensionless URLs and
-                        // text/html MIME types, which FFmpeg's probe rejects.
-                        .arg("-f")
-                        .arg("hls")
-                        .arg("-allowed_segment_extensions")
-                        .arg("ALL")
-                        .arg("-extension_picky")
-                        .arg("0")
-                        .arg("-seg_max_retry")
-                        .arg("5");
+                command.args([
+                    "-allowed_extensions",
+                    "ALL",
+                    "-rw_timeout",
+                    "15000000",
+                    "-i",
+                ]);
+                if let Some(prepared) = &prepared {
+                    command.arg(&prepared.playlist);
+                } else {
+                    command.arg(playlist_url.as_str());
                 }
-                command
-                    .arg("-allowed_extensions")
-                    .arg("ALL")
-                    .arg("-rw_timeout")
-                    .arg("15000000")
-                    .arg("-i")
-                    .arg(playlist_url.as_str())
-                    .arg("-map")
-                    .arg("0:v?")
-                    .arg("-map")
-                    .arg("0:a?");
+                command.args(["-map", "0:v?", "-map", "0:a?"]);
                 configure_stream_codecs(&mut command, repair_audio);
                 let mut child = KillOnDropChild::new(
                     command
@@ -756,6 +767,9 @@ impl DownloadService {
                 match attempt_error {
                     None => {
                         last_error = None;
+                        if let Some(prepared) = &prepared {
+                            prepared.cleanup().await;
+                        }
                         break 'playlists;
                     }
                     Some(error) => {
@@ -972,6 +986,10 @@ impl DownloadService {
     }
 
     pub async fn remove_temp_artifacts(&self, target_path: &Path) -> Result<(), String> {
+        let cache = hls::cache_path(target_path);
+        if fs::try_exists(&cache).await.unwrap_or(false) {
+            let _ = fs::remove_dir_all(cache).await;
+        }
         let partial_path = self.partial_path_for(target_path);
         if fs::try_exists(&partial_path).await.unwrap_or(false) {
             let _ = fs::remove_file(&partial_path).await;

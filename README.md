@@ -131,6 +131,19 @@ Use **Show in folder** on a download to find its exact location. Sidebar categor
 
 The default concurrency is **3 downloads**, the default speed limit is **unlimited**, and desktop notifications are enabled by default. Closing the window hides it to the tray; it does not quit the application.
 
+### Faster HLS downloads
+
+Plain, finite HLS media playlists can download up to four segments in parallel.
+Completed segments are cached locally, then FFmpeg creates the MP4. If AAC audio
+needs repair, the retry uses the cached video instead of downloading it again.
+The transfer estimate is based on completed segment sizes; final processing can
+continue after the network transfer reaches 100%.
+
+Live, encrypted, master and other complex playlists keep the existing FFmpeg
+path. Speed depends on the source server. The cache temporarily needs extra disk
+space alongside the output; it is removed after successful processing or explicit
+cancellation. Pausing preserves completed segments for the same playlist.
+
 ### Progress and CPU usage
 
 Speed and ETA refer to the current transfer. For video downloads, extraction, separate audio/video transfers and final merging are different stages; the remaining-time value is not a promise of total completion time. Unknown sizes or durations display a dash.
@@ -217,6 +230,9 @@ python3 scripts/test-installer.py
 
 # Optional: requires installed yt-dlp; uses a localhost fixture
 cargo test --workspace real_ytdlp_reports_live_speed_and_eta -- --ignored
+
+# Optional: FFmpeg test with generated localhost HLS media
+cargo test --workspace prefetched_hls_muxes_to_playable_mp4 -- --ignored
 ```
 
 | Directory | Contents |
