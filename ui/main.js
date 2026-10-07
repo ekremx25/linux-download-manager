@@ -144,7 +144,23 @@ async function clearDownload(id){
 function confirmFileDeletion(fileName){
   return new Promise(resolve=>{
     const dialog=document.createElement('dialog');dialog.className='delete-confirm';
-    dialog.innerHTML='<h2>Delete downloaded files?</h2><p class="delete-file-name"></p><p>This permanently deletes the downloaded file and its temporary data, and removes it from the list.</p><form method="dialog"><button value="cancel" autofocus>Cancel</button><button value="delete" class="danger">Delete files</button></form>';
+    dialog.setAttribute('aria-labelledby','delete-dialog-title');
+    dialog.setAttribute('aria-describedby','delete-dialog-description');
+    dialog.innerHTML=`
+      <div class="delete-dialog-content">
+        <span class="delete-dialog-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6"/></svg></span>
+        <h2 id="delete-dialog-title">Delete this download?</h2>
+        <p id="delete-dialog-description">The file and its temporary data will be permanently deleted and removed from your list.</p>
+        <div class="delete-file-card">
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M8 13h8M8 17h5"/></svg>
+          <div><span class="delete-file-label">SELECTED FILE</span><p class="delete-file-name"></p></div>
+        </div>
+        <p class="delete-dialog-warning">This action cannot be undone.</p>
+      </div>
+      <form method="dialog" class="delete-dialog-actions">
+        <button value="cancel" class="delete-dialog-cancel" autofocus>Keep file</button>
+        <button value="delete" class="delete-dialog-submit">Delete file</button>
+      </form>`;
     dialog.querySelector('.delete-file-name').textContent=fileName;
     dialog.addEventListener('close',()=>{const confirmed=dialog.returnValue==='delete';dialog.remove();resolve(confirmed);},{once:true});
     document.body.appendChild(dialog);dialog.showModal();
