@@ -40,6 +40,8 @@ fn parse(text: &str, base: &Url) -> Option<(String, Vec<Url>)> {
                 "#EXT-X-TARGETDURATION",
                 "#EXT-X-MEDIA-SEQUENCE",
                 "#EXT-X-VERSION",
+                // Legacy cache hint does not change segment layout or encoding.
+                "#EXT-X-ALLOW-CACHE",
                 "#EXT-X-PLAYLIST-TYPE",
                 "#EXT-X-DISCONTINUITY",
                 "#EXT-X-DISCONTINUITY-SEQUENCE",
@@ -214,6 +216,18 @@ pub(super) async fn prepare(
 mod tests {
     use super::*;
     #[test]
+    fn legacy_cache_hint_does_not_disable_parallel_downloads() {
+        let url = Url::parse("https://example.com/playlist").unwrap();
+        for value in ["YES", "NO"] {
+            let text = format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-ALLOW-CACHE:{value}\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:10,\npart.ts\n#EXT-X-ENDLIST\n");
+            let (_, urls) = parse(&text, &url).expect("legacy HLS cache hints must allow prefetch");
+            assert_eq!(urls.len(), 1);
+            assert!(parse(&text.replace("#EXT-X-ENDLIST", ""), &url).is_none());
+            assert!(parse(&format!("#EXT-X-KEY:METHOD=AES-128,URI=key\n{text}"), &url).is_none());
+        }
+    }
+
+    #[test]
     fn only_plain_finite_playlists_are_prefetched() {
         let url = Url::parse("https://example.com/hls/list").unwrap();
         let text = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\npart.ts\n#EXT-X-ENDLIST\n";
@@ -278,7 +292,7 @@ mod integration_tests {
                         let header = String::from_utf8_lossy(&input[..n]);
                         let body = if header.starts_with("GET /playlist.m3u8 ") {
                             format!(
-                                "#EXTM3U\n#EXT-X-TARGETDURATION:1\n{}#EXT-X-ENDLIST\n",
+                                "#EXTM3U\n#EXT-X-ALLOW-CACHE:YES\n#EXT-X-TARGETDURATION:1\n{}#EXT-X-ENDLIST\n",
                                 (0..8)
                                     .map(|i| format!("#EXTINF:1,\nsegment-{i}.ts\n"))
                                     .collect::<String>()
