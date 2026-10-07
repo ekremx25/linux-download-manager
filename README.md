@@ -20,7 +20,7 @@
   <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-orange.svg">
 </p>
 
-
+![Linux Download Manager interface with download categories and settings](docs/images/download-manager.png)
 
 ---
 
