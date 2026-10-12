@@ -1,0 +1,21 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Linux Download Manager</title><link rel="stylesheet" href="popup.css"></head><body>
+<header><strong>↓ Linux Download Manager</strong><button id="open" title="Open application">Open app ↗</button></header>
+<p id="connection" role="status">Connecting…</p><div id="error" role="alert" hidden></div>
+<nav><button data-tab="downloads" class="active">Downloads</button><button data-tab="media">This page</button><button data-tab="settings">Capture settings</button></nav>
+<section id="downloads"><div id="download-list"></div><p id="no-downloads" hidden>No active downloads.</p></section>
+<section id="media" hidden><h2>Default video / audio preferences</h2>
+<label for="media-container">File format</label><select id="media-container"><option value="mp4">MP4 video</option><option value="mkv">MKV video</option><option value="webm">WebM video</option><option value="mp3">MP3 — audio only</option><option value="m4a">M4A — audio only</option></select>
+<label for="media-height">Default resolution</label><select id="media-height"><option value="0">Best quality</option><option value="360">360p</option><option value="480">480p</option><option value="720">720p</option><option value="1080">1080p</option><option value="1440">1440p</option><option value="2160">4K (2160p)</option><option value="4320">8K (4320p)</option></select>
+<p>Preferences are shared with LDM. MP3/M4A extracts audio; resolution does not apply.</p><button id="save-media" class="primary">Save preferences</button><p id="media-saved" role="status"></p><button id="page-video" class="primary">Download page video / audio</button><div id="media-list"></div><p id="no-media" hidden>Play a video on the page to discover its streams.</p></section>
+<section id="settings" hidden>
+<label class="toggle"><input id="capture-enabled" type="checkbox"> Automatically download supported files with LDM</label>
+<p>The browser download is cancelled after LDM accepts it. If LDM is unavailable, the browser continues downloading.</p>
+<h2>Supported file types</h2>
+<label for="extensions">File extensions</label>
+<textarea id="extensions" rows="7" maxlength="6500" spellcheck="false" aria-describedby="extensions-help"></textarea>
+<p id="extensions-help">Separate extensions with commas or spaces. Remove types you do not want to capture. An empty list disables automatic capture.</p>
+<label for="custom">Add a file type</label><div class="extension-add"><input id="custom" placeholder="e.g. cbz, cbr" maxlength="1000"><button id="add-extension" type="button">Add</button></div>
+<p id="extension-count" role="status"></p>
+<div class="settings-actions"><button id="reset-types" type="button">Restore defaults</button><button id="save" class="primary">Save</button></div><p id="saved" role="status"></p></section>
+
+<script src="popup.js"></script></body></html>

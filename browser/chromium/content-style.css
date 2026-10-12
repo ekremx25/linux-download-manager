@@ -1,0 +1,157 @@
+.ldm-hover-button[hidden] {
+  display: none !important;
+}
+
+.ldm-hover-button {
+  position: absolute;
+  z-index: 2147483647;
+  border: 0;
+  border-radius: 999px;
+  padding: 8px 12px;
+  font: 700 12px/1 "IBM Plex Sans", "Segoe UI", sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #04110d;
+  background: linear-gradient(135deg, #3dd29f, #86e8ff);
+  box-shadow: 0 16px 30px rgba(3, 15, 14, 0.28);
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
+}
+
+.ldm-hover-button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 18px 36px rgba(3, 15, 14, 0.34);
+}
+
+.ldm-hover-button-sent {
+  background: linear-gradient(135deg, #91f7c2, #b6f3ff);
+}
+
+.ldm-media-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+  pointer-events: none;
+}
+
+.ldm-media-button {
+  position: fixed !important;
+  display: block !important;
+  width: auto !important;
+  height: auto !important;
+  min-width: 0 !important;
+  border: 0 !important;
+  border-radius: 999px !important;
+  padding: 10px 16px !important;
+  font: 700 13px/1 "IBM Plex Sans", "Segoe UI", sans-serif !important;
+  letter-spacing: 0.04em !important;
+  color: #04110d !important;
+  background: linear-gradient(135deg, #3dd29f, #86e8ff) !important;
+  box-shadow: 0 18px 34px rgba(3, 15, 14, 0.45) !important;
+  opacity: 1 !important;
+  visibility: visible !important;
+  cursor: pointer !important;
+  pointer-events: auto !important;
+}
+
+.ldm-media-button-floating {
+  z-index: 2147483647;
+}
+
+.ldm-toast-root {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 2147483647;
+  pointer-events: none;
+}
+
+.ldm-toast {
+  max-width: 360px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  font: 600 13px/1.4 "IBM Plex Sans", "Segoe UI", sans-serif;
+  color: #ecfffb;
+  box-shadow: 0 18px 34px rgba(3, 15, 14, 0.32);
+}
+
+.ldm-toast-success {
+  background: rgba(15, 126, 95, 0.96);
+}
+
+.ldm-toast-info {
+  background: rgba(35, 89, 154, 0.96);
+}
+
+.ldm-toast-error {
+  background: rgba(164, 46, 46, 0.96);
+}
+
+.ldm-quality-picker {
+  z-index: 2147483647;
+  background: rgba(18, 18, 18, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 6px 0;
+  min-width: 180px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(12px);
+}
+
+.ldm-quality-title {
+  padding: 10px 16px 6px;
+  font: 700 13px/1 "IBM Plex Sans", "Segoe UI", sans-serif;
+  color: #86e8ff;
+  letter-spacing: 0.04em;
+}
+
+.ldm-quality-option {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: #e8e8e8;
+  font: 500 13px/1 "IBM Plex Sans", "Segoe UI", sans-serif;
+  padding: 10px 16px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 80ms;
+}
+
+.ldm-quality-option:hover {
+  background: rgba(61, 210, 159, 0.18);
+  color: #3dd29f;
+}
+
+/* Compact, outside-player controls. System colors follow browser light/dark mode. */
+.ldm-player-toolbar,.ldm-hover-button,.ldm-media-button{
+  box-sizing:border-box!important;width:174px!important;height:36px!important;min-height:36px!important;
+  padding:0 12px!important;border:1px solid color-mix(in srgb,CanvasText 20%,Canvas)!important;
+  border-radius:9px!important;background:Canvas!important;color:CanvasText!important;
+  font:600 12px/34px system-ui,sans-serif!important;letter-spacing:0!important;text-transform:none!important;
+  text-align:center!important;white-space:nowrap!important;cursor:pointer!important;
+  box-shadow:0 3px 12px #0002!important;z-index:2147483646!important;pointer-events:auto!important;
+}
+.ldm-player-toolbar[hidden],.ldm-media-button[hidden],.ldm-hover-button[hidden]{display:none!important}
+.ldm-player-toolbar:hover,.ldm-hover-button:hover,.ldm-media-button:hover{background:ButtonFace!important}
+.ldm-player-toolbar:focus-visible,.ldm-quality-option:focus-visible,.ldm-media-button:focus-visible{outline:2px solid Highlight!important;outline-offset:2px!important}
+.ldm-quality-picker{
+  position:fixed!important;z-index:2147483647!important;width:260px!important;max-width:calc(100vw - 32px)!important;
+  max-height:calc(100vh - 32px)!important;overflow:auto!important;padding:12px!important;
+  background:Canvas!important;color:CanvasText!important;border:1px solid color-mix(in srgb,CanvasText 20%,Canvas)!important;
+  border-radius:14px!important;box-shadow:0 16px 60px #0004!important;pointer-events:auto!important;
+}
+.ldm-quality-title{font:700 16px/24px system-ui,sans-serif!important;color:CanvasText!important;padding:8px 10px 14px!important}
+.ldm-quality-option{box-sizing:border-box!important;display:block!important;width:100%!important;text-align:left!important;
+  font:500 13px/20px system-ui,sans-serif!important;padding:9px 10px!important;background:transparent!important;
+  border:0!important;border-radius:7px!important;color:CanvasText!important;cursor:pointer!important}
+.ldm-quality-option:hover{background:ButtonFace!important;color:CanvasText!important}
+.ldm-quality-close{position:absolute!important;right:14px!important;top:16px!important;border:0!important;
+  background:transparent!important;color:CanvasText!important;font:20px system-ui!important;cursor:pointer!important}
+
+
+#ldm-yt-download-btn.ldm-youtube-header-button{flex:0 0 auto!important;margin:0 8px 0 0!important;width:auto!important;height:36px!important;border-radius:18px!important;background:var(--yt-spec-badge-chip-background, #eee)!important;color:var(--yt-spec-text-primary, #0f0f0f)!important;box-shadow:none!important;white-space:nowrap!important}
+@media(max-width:700px){#ldm-yt-download-btn.ldm-youtube-header-button{max-width:110px!important;overflow:hidden!important;text-overflow:ellipsis!important;padding:0 8px!important;font-size:11px!important}}
+
+.ldm-quality-container{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:8px!important;padding:8px 10px!important;font:13px system-ui,sans-serif!important;color:CanvasText!important}
+.ldm-quality-container select{font:inherit!important;color:CanvasText!important;background:Canvas!important;border:1px solid ButtonBorder!important;border-radius:6px!important;padding:6px!important;max-width:160px!important}

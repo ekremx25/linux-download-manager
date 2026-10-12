@@ -1,0 +1,7 @@
+{
+  "name": "com.eko.linuxdownloadmanager",
+  "description": "Native messaging bridge for Linux Download Manager",
+  "path": "__HOST_BINARY_PATH__",
+  "type": "stdio",
+  "allowed_origins": ["__EXTENSION_ORIGIN__"]
+}

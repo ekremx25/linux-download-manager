@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Linux Download Manager</title><link rel="stylesheet" href="styles.css">
+</head>
+<body class="main-page">
+<div class="app-shell">
+  <header class="titlebar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">↓</span><div><strong>Linux Download Manager</strong><small>All your downloads in one place.</small></div></div>
+    <label class="search"><span aria-hidden="true">⌕</span><input id="search-input" type="search" placeholder="Search by file name…" aria-label="Search downloads"></label>
+  </header>
+  <aside class="sidebar" aria-label="Download categories">
+    <p class="sidebar-label">LIBRARY</p>
+    <button class="category active" data-filter="all"><span>▤</span><strong>All files</strong><em id="count-all">0</em></button>
+    <button class="category" data-filter="active"><span>↓</span>Downloading</button>
+    <button class="category" data-filter="paused"><span>Ⅱ</span>Paused</button>
+    <button class="category" data-filter="failed"><span>!</span>Failed</button>
+    <button class="category" data-filter="finished"><span>✓</span>Completed</button>
+    <div class="sidebar-divider"></div><p class="sidebar-label">FILE TYPE</p>
+    <div class="category-group" id="category-list">
+      <button class="category" data-filter="video"><span>▷</span>Videos</button>
+      <button class="category" data-filter="music"><span>♫</span>Music</button>
+      <button class="category" data-filter="image"><span>▧</span>Images</button>
+      <button class="category" data-filter="document"><span>▤</span>Documents</button>
+      <button class="category" data-filter="compressed"><span>▥</span>Archives</button>
+      <button class="category" data-filter="apps"><span>◇</span>Applications</button>
+      <button class="category" data-filter="iso"><span>◉</span>ISO</button>
+      <button class="category" data-filter="other"><span>·</span>Other</button>
+    </div>
+    <p class="sidebar-hint">New download <kbd>Ctrl N</kbd><br>Double-click a file for details.</p>
+  </aside>
+  <main class="workspace">
+    <div class="page-heading"><div><p class="eyebrow">DOWNLOAD CENTER</p><h1>Downloads</h1></div><button id="add-url" class="button primary">＋ Add URL</button></div>
+    <section class="overview" aria-label="Download overview">
+      <div class="stat"><span>Active downloads</span><strong id="stat-active">0</strong><small id="stat-waiting">Queue is empty</small></div>
+      <div class="stat"><span>Completed</span><strong id="stat-completed">0</strong><small>Files in your download history</small></div>
+    </section>
+    <nav class="toolbar" aria-label="Download actions">
+      <button id="start-queue" class="tool">▶ Resume all</button>
+      <button id="stop-all" class="tool">Ⅱ Pause all</button>
+      <span class="toolbar-spacer"></span>
+      <button id="open-folder" class="tool">▱ Downloads folder</button>
+      <button id="toggle-settings" class="tool" aria-expanded="false" aria-controls="settings-panel">⚙ Settings</button>
+    </nav>
+    <section id="settings-panel" class="settings-panel" hidden aria-labelledby="settings-heading">
+      <div><h2 id="settings-heading">Download settings</h2><p>Defaults for new downloads.</p></div>
+      <label>Concurrent downloads<input id="settings-max-concurrent" type="number" min="1" max="10" required></label>
+      <label>Download speed<select id="settings-speed-mode"><option value="unlimited">Unlimited — maximum available speed</option><option value="limited">Limit download speed</option></select></label>
+      <label>Speed limit<input id="settings-bandwidth-limit" type="number" min="0.001" step="any" value="100" required disabled></label>
+      <label>Speed unit<select id="settings-speed-unit" disabled><option value="mbps">Mbps (internet connection)</option><option value="mbs">MB/s</option><option value="kibs">KiB/s</option></select></label>
+      <p class="settings-note" id="settings-speed-hint">Unlimited mode applies no LDM speed cap. Actual speed depends on your connection and the server.</p>
+      <p class="settings-note">The limit applies per file to new downloads; all connections for that file share the limit. 1000 Mbps ≈ 125 MB/s.</p>
+      <label class="settings-toggle">Start LDM when I sign in<input id="settings-start-on-login" type="checkbox"></label>
+      <label class="settings-toggle">Desktop notifications<input id="settings-desktop-notifications" type="checkbox"></label>
+      <label>Connections per file<select id="settings-connections"><option value="0">Automatic (2–4)</option><option value="1">1 connection</option><option value="2">2 connections</option><option value="3">3 connections</option><option value="4">4 connections</option><option value="5">5 connections</option><option value="6">6 connections</option><option value="7">7 connections</option><option value="8">8 connections</option><option value="9">9 connections</option><option value="10">10 connections</option><option value="11">11 connections</option><option value="12">12 connections</option><option value="13">13 connections</option><option value="14">14 connections</option><option value="15">15 connections</option><option value="16">16 connections</option></select></label>
+      <label class="settings-toggle">Show video quality menu before downloading<input id="settings-quality-menu" type="checkbox"></label>
+      <p class="settings-note">Off: the browser video button downloads the best available quality immediately. On: choose quality or audio before downloading.</p>
+      <label>Maximum video resolution<select id="settings-height"><option value="0">Best available</option><option value="360">360p</option><option value="480">480p</option><option value="720">720p</option><option value="1080">1080p</option><option value="1440">1440p</option><option value="2160">2160p</option><option value="4320">4320p</option></select></label>
+      <label>Video / audio output<select id="settings-container"><option value="mp4">MP4 video</option><option value="mkv">MKV video</option><option value="webm">WebM video</option><option value="mp3">MP3 audio</option><option value="m4a">M4A audio</option></select></label>
+      <label class="settings-toggle">Open details when a download starts<input id="settings-show-detail" type="checkbox"></label>
+      <label class="settings-toggle">Close details on successful completion<input id="settings-auto-close" type="checkbox"></label>
+      <div class="capture-settings"><h2>Supported file types</h2>
+<label class="settings-toggle"><input id="capture-enabled" type="checkbox"> Automatically download these file types with LDM</label>
+<label for="capture-types">File extensions (separate with spaces or commas)</label><textarea id="capture-types" rows="4" maxlength="6500" spellcheck="false"></textarea>
+<button id="capture-default" class="button" type="button">Default</button>
+<label for="capture-excluded">Do not automatically download from these sites / addresses</label><textarea id="capture-excluded" rows="3" maxlength="12000" spellcheck="false" placeholder="e.g. *.example.com or https://example.com/files/*"></textarea>
+<button id="capture-excluded-default" class="button" type="button">Default</button><p>The browser extension uses this list. Browser downloads are cancelled only after LDM accepts them.</p>
+<button id="capture-save" class="button primary" type="button">Save file types</button><span id="capture-status" role="status"></span></div>
+<p class="settings-note">Video preferences apply to page/stream downloads. Direct files keep their original format.</p>
+      <button id="save-settings" class="button primary">Save</button>
+    </section>
+    <section class="download-surface" aria-label="Download list">
+      <div class="table-caption"><div><h2 id="view-description">All files</h2><p id="list-description">Speed and time left update while downloading.</p></div><button id="clear-completed" class="button quiet" title="Removes history entries only; downloaded files are kept.">Clear completed</button></div>
+      <div id="notice" class="notice" hidden role="status"></div>
+      <div id="selection-bar" class="selection-bar" hidden><strong id="selected-count">0 selected</strong><button id="resume-selected" class="button">▶ Resume</button><button id="pause-selected" class="button">Ⅱ Pause</button><button id="clear-selection" class="button quiet">Clear selection</button></div>
+      <div class="download-table" role="table" aria-label="Downloads">
+        <div class="download-row table-head" role="row"><input id="select-all" type="checkbox" aria-label="Select all visible files"><button class="sort-button" data-sort="fileName" aria-label="Sort by File">File <span class="sort-arrow"></span></button><button class="sort-button" data-sort="totalBytes" aria-label="Sort by Size">Size <span class="sort-arrow"></span></button><button class="sort-button" data-sort="status" aria-label="Sort by Status">Status <span class="sort-arrow"></span></button><button class="sort-button" data-sort="speedBytesPerSecond" aria-label="Sort by Speed">Speed <span class="sort-arrow"></span></button><button class="sort-button" data-sort="etaSeconds" aria-label="Sort by Time left">Time left <span class="sort-arrow"></span></button><span>Actions</span></div>
+        <div id="download-rows" class="table-body"></div>
+      </div>
+      <div id="empty-state" class="empty-state" hidden><span>↓</span><h2>No files in this view</h2><p>Add a URL or change the filter.</p><button class="button primary" data-open-add>Add URL</button></div>
+    </section>
+  </main>
+  <footer class="statusbar"><span id="selection-summary">0 files</span><span id="queue-summary">Ready</span></footer>
+</div>
+<script type="module" src="main.js"></script>
+</body></html>

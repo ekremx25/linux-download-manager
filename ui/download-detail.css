@@ -1,0 +1,22 @@
+/* Use the application's shared light/dark theme tokens. */
+.dialog-header .brand{min-width:0;flex:1}
+.dialog-header h1{max-width:none;min-width:0}
+.brand-mark{flex-shrink:0}
+.window-actions{display:flex;gap:6px;margin-left:12px;flex-shrink:0}
+.detail-summary{grid-template-columns:130px minmax(0,1fr);gap:11px 16px;margin:4px 0 26px}
+.detail-summary dd{overflow-wrap:anywhere;min-width:0}
+#d-url,#d-path{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hero-progress{height:12px}
+.detail-controls{flex-wrap:wrap;gap:14px;margin:22px 0}
+.detail-auto-close{margin:0;flex:1;font-size:12px}
+.transfer-actions{display:flex;gap:8px}
+#connection-details{border-top:1px solid var(--border);padding-top:22px}
+.connection-caption{text-align:center;font-size:12px;color:var(--muted);margin:0 0 14px}
+.segment-strip{margin:0 0 14px}
+.segment-table tbody tr:nth-child(even){background:var(--surface-2)}
+.segment-table th,.segment-table td{padding:11px 9px}
+.extra-information{margin-top:18px;font-size:12px;color:var(--muted)}
+.extra-information summary{cursor:pointer}
+.extra-information .detail-summary{margin-top:16px}
+.background-hint{font-size:11px;color:var(--muted);margin-right:auto}
+@media(max-width:580px){.detail-summary{grid-template-columns:110px minmax(0,1fr)}.detail-controls .transfer-actions{margin-left:auto}.detail-auto-close{flex:none}.segment-table{font-size:11px}.segment-table th,.segment-table td{padding:9px 5px}}

@@ -1,0 +1,40 @@
+import {isTauri,invoke,listen,formatBytes,formatSpeed,formatTime,progressOf,statusLabel,setNotice,escapeHtml} from './shared.js';
+const $=id=>document.getElementById(id);let current=null;let live={};let unlisten=null;let selectedId=null;let requestVersion=0;let loading=false;
+const DEMO={download:{id:3,fileName:'Stories-of-Shahnameh.mp4',url:'https://media.example.org/story.mp4',savePath:'~/Downloads/Stories-of-Shahnameh.mp4',totalBytes:1224065679,downloadedBytes:478517248,status:'in_progress',scheduledAt:null,bandwidthLimitKbps:null,expectedChecksum:null},resumeSupported:true,segments:[0,1,2,3].map((index)=>({index,status:index<2?'receiving':'paused',downloadedBytes:index<2?90000000:45000000,totalBytes:306016419}))};
+document.addEventListener('DOMContentLoaded',async()=>{bind();if(!isTauri){current=DEMO;live={speedBytesPerSecond:5151129,etaSeconds:142};render(current);return;}const unlistenState=await listen('download://state',event=>{if(current&&event.payload.id===selectedId&&event.payload.id===current.download.id){live=event.payload;if(document.hidden)return;render(current);if(['completed','failed','cancelled'].includes(event.payload.status))load(current.download.id);}});const unlistenSelected=await listen('download://selected',event=>load(Number(event.payload)));unlisten=()=>{unlistenState();unlistenSelected();};await load();setInterval(()=>{if(!loading&&!document.hidden)load();},1000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)load();});});
+function bind(){
+  $('auto-close-detail').onchange=async()=>{try{const s=await invoke('app_settings');await invoke('update_app_settings',{features:{...s.features,autoCloseDetail:$('auto-close-detail').checked}});}catch(e){setNotice($('detail-notice'),String(e),'error');}};
+  if(isTauri)invoke('app_settings').then(s=>$('auto-close-detail').checked=!!s.features?.autoCloseDetail).catch(e=>setNotice($('detail-notice'),String(e),'error'));
+  $('minimize').onclick=()=>invoke('minimize_download_detail').catch(e=>setNotice($('detail-notice'),String(e),'error'));
+  $('toggle-details').onclick=()=>{const hidden=!$('connection-details').hidden;$('connection-details').hidden=hidden;$('toggle-details').textContent=hidden?'Show details':'Hide details';$('toggle-details').setAttribute('aria-expanded',String(!hidden));};
+$('close').onclick=$('close-bottom').onclick=()=>invoke('hide_app_window',{label:'download-detail'});document.addEventListener('keydown',event=>{if(event.key==='Escape')invoke('hide_app_window',{label:'download-detail'});});$('pause-resume').onclick=control;$('cancel-download').onclick=cancel;}
+async function load(id=selectedId){const target=Number.isFinite(id)?id:null;if(target!==selectedId){selectedId=target;live={};}const version=++requestVersion;loading=true;try{const detail=await invoke('download_detail',{id:target});if(version!==requestVersion)return;if(detail.download.id!==selectedId)live={};selectedId=detail.download.id;current=detail;render(current);}catch(error){if(version===requestVersion)setNotice($('detail-notice'),String(error),'error');}finally{if(version===requestVersion)loading=false;}}
+function render(detail){const d={...detail.download,...live};const progress=progressOf(d);$('detail-title').textContent=progress.toFixed(0)+'% · '+d.fileName;$('d-name').textContent=d.fileName;$('d-status').textContent=statusLabel(d.status);if(d.errorMessage)setNotice($('detail-notice'),d.errorMessage,'error');else $('detail-notice').hidden=true;$('d-size').textContent=formatBytes(d.totalBytes||d.downloadedBytes);$('d-downloaded').textContent=formatBytes(d.downloadedBytes);$('d-speed').textContent=formatSpeed(live.speedBytesPerSecond);$('d-eta').textContent=formatTime(live.etaSeconds);$('d-resume').textContent=detail.resumeSupported?'Yes':'No';$('detail-progress').style.width=`${progress}%`;$('progress-label').textContent=`${progress.toFixed(0)}%`;$('d-url').textContent=$('d-url').title=d.url;$('d-path').textContent=$('d-path').title=d.savePath;$('detail-progress').parentElement.setAttribute('aria-valuenow',String(Math.round(progress)));$('d-schedule').textContent=d.scheduledAt||'Not scheduled';$('d-bandwidth').textContent=d.bandwidthLimitKbps?`${d.bandwidthLimitKbps} KB/s`:'Unlimited';$('d-checksum').textContent=d.expectedChecksum||'Not configured';const resumable=['paused','failed','cancelled'].includes(d.status);$('pause-resume').textContent=resumable?'Resume':'Pause';$('pause-resume').disabled=!resumable&&!['in_progress','queued'].includes(d.status);$('cancel-download').disabled=['completed','cancelled'].includes(d.status);renderSegments(detail.mediaTransfer?.parts?.length?detail.mediaTransfer.parts.map(p=>({...p,worker:true,status:['paused','cancelled','failed'].includes(d.status)&&['receiving','connecting'].includes(p.status)?d.status:p.status})):(detail.segments||[]));renderMediaTransfer(detail.mediaTransfer,d.status);}
+let lastSegments='';
+function renderSegments(segments){const serialized=JSON.stringify(segments);if(serialized===lastSegments)return;lastSegments=serialized;$('segment-strip').innerHTML=segments.map(s=>`<span style="flex:${s.worker?1:Math.max(1,s.totalBytes)}" title="Part ${s.index+1}: ${escapeHtml(statusLabel(s.status))} — ${formatBytes(s.downloadedBytes)} / ${formatBytes(s.totalBytes)}"><i class="${escapeHtml(s.status)}" style="width:${s.totalBytes?Math.min(100,100*s.downloadedBytes/s.totalBytes):0}%"></i></span>`).join('');$('segment-rows').innerHTML=segments.length?segments.map(s=>`<tr><td>${s.index+1}</td><td>${statusLabel(s.status)}</td><td>${formatBytes(s.downloadedBytes)}</td><td>${s.totalBytes?formatBytes(s.totalBytes):'—'}</td><td>${s.label?escapeHtml(s.label):formatBytes(s.start||0)}</td></tr>`).join(''):'<tr><td colspan="5">No part information is available for this download.</td></tr>';}
+async function control(){if(!current||loading||current.download.id!==selectedId)return;const status={...current.download,...live}.status;try{await invoke(['paused','failed','cancelled'].includes(status)?'resume_download':'pause_download',{id:current.download.id});await load();}catch(error){setNotice($('detail-notice'),String(error),'error');}}
+async function cancel(){if(!current||loading||current.download.id!==selectedId)return;try{await invoke('cancel_download',{id:current.download.id});await load();}catch(error){setNotice($('detail-notice'),String(error),'error');}}
+window.addEventListener('unload',()=>unlisten?.());
+
+
+function renderMediaTransfer(media,status){
+  const parts=media?.parts||[];
+  $('segment-position-heading').textContent=media?'Part':'Start';
+  $('media-transfer').hidden=!media;
+  $('connection-table').hidden=!!media&&!parts.length;
+  $('segment-strip').hidden=!!media&&!parts.length;
+  $('connection-caption').textContent=media?'Video / audio transfer':'Start positions and download progress by connections';
+  if(!media)return;
+  const fragmented=Number.isFinite(media.totalFragments)&&media.totalFragments>0;
+  $('media-mode').textContent=fragmented?'Fragmented video stream (yt-dlp)':'Video / audio transfer (yt-dlp)';
+  $('media-fragments').textContent=fragmented
+    ? `${media.completedFragments??0} / ${media.totalFragments} stream fragments completed`
+    : parts.length?'HTTP byte ranges use separate connections.':'Waiting for stream fragment information.';
+  const stopped=['paused','cancelled','failed','completed'].includes(status);
+  const receiving=stopped?0:parts.filter(p=>p.status==='receiving').length;
+  const waiting=stopped?0:parts.filter(p=>p.status==='connecting').length;
+  $('media-parallel').textContent=parts.length
+    ? `Active requests: ${receiving+waiting} / ${media.parallelLimit} · Receiving: ${receiving} · Waiting for server: ${waiting}. Completed slots take the next fragment.`
+    : `Parallel limit: ${media.parallelLimit}. Actual concurrency depends on the server and remaining fragments.`;
+
+}

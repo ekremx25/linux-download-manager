@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions for the main, add-download and download-detail windows.",
+  "windows": [
+    "main",
+    "add-download",
+    "download-detail"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "dialog:default",
+    "notification:default"
+  ]
+}
