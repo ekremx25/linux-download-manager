@@ -36,7 +36,7 @@ jobs:
           test -x squashfs-root/usr/bin/browser_native_host
           find squashfs-root -name youtube-audio-observer.js | grep .
           mkdir -p dist
-          cp "$image" dist/Linux_Download_Manager-0.2.0-x86_64.AppImage
+          cp "$image" dist/Linux_Download_Manager-0.2.1-x86_64.AppImage
           cd dist
           sha256sum *.AppImage > SHA256SUMS-AppImage
       - uses: actions/upload-artifact@v4

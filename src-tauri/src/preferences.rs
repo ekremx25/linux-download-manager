@@ -56,6 +56,9 @@ impl TransferPreferences {
         let language = self
             .audio_language
             .as_ref()
+            // YouTube reports "und" when the player does not identify a track.
+            // It is not a real language to constrain yt-dlp to.
+            .filter(|language| language.as_str() != "und")
             .map(|l| format!("[language^={l}]"))
             .unwrap_or_default();
         if matches!(self.container.as_str(), "mp3" | "m4a") {
@@ -173,6 +176,14 @@ mod tests {
         );
         p.container = "mp3".into();
         assert_eq!(p.ytdlp_args(None)[1], "ba[language^=tr]/b[language^=tr]");
+    }
+    #[test]
+    fn unspecified_audio_language_uses_normal_format_selection() {
+        let p = TransferPreferences {
+            audio_language: Some("und".into()),
+            ..Default::default()
+        };
+        assert_eq!(p.ytdlp_args(None)[1], "bv*+ba/b");
     }
     #[test]
     fn legacy_preferences_keep_existing_defaults() {

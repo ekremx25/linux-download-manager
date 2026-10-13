@@ -11,6 +11,7 @@ with yt_dlp.YoutubeDL({'quiet':True}) as y:
  ctx={'formats':formats,'has_merged_format':False,'incomplete_formats':False}
  chosen=list(select(ctx));assert chosen[0]['format_id']=='video+tr',chosen
  formats.append({**formats[1],'format_id':'en','language':'en'})
- try:list(select(ctx));raise AssertionError('ambiguous languages accepted')
- except yt_dlp.utils.DownloadError:pass
-print('PASS: unspecified player language resolves to sole available language; ambiguous languages rejected')
+ chosen=list(select(ctx));assert chosen, 'ambiguous languages should use yt-dlp default'
+ formats[1]['language']='und';formats[2]['language']='und'
+ chosen=list(select(ctx));assert chosen, 'unidentified audio tracks should use yt-dlp default'
+print('PASS: unspecified player language uses the sole known language or yt-dlp default')

@@ -254,7 +254,9 @@ def format_selector(self, spec):
                 return original_selector(self, spec.replace(marker, f'[language={language}]'))(context)
             if len(audio) == 1:
                 return original_selector(self, spec.replace(marker, ''))(context)
-        raise yt_dlp.utils.DownloadError('The selected audio language is unspecified and this video has multiple or unidentified audio tracks. Select an audio language in the player and try again.')
+        # "und" is not a selected language. If several tracks are available,
+        # let yt-dlp use its normal default instead of failing the download.
+        return original_selector(self, spec.replace(marker, ''))(context)
     return select
 
 
