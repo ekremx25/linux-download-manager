@@ -1098,6 +1098,9 @@ impl DownloadService {
             .map_err(|error| format!("failed to finalize downloaded stream file: {error}"))?;
         // Fallback success no longer needs a cache left by failed prefetch.
         let _ = fs::remove_dir_all(hls::cache_path(target_path)).await;
+        // yt-dlp may have left fragment files before this HLS fallback succeeded.
+        // Its private workspace is no longer needed once the final video exists.
+        let _ = fs::remove_dir_all(hidden_work_dir(target_path, "ytdlp")).await;
 
         Ok((downloaded_bytes, None, 1))
     }

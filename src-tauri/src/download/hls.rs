@@ -909,7 +909,12 @@ mod integration_tests {
             .status()
             .unwrap();
         assert!(status.success());
-        let fixture = Fixture::start(fs::read(&source).await.unwrap());
+        let fixture = Fixture::start_count(fs::read(&source).await.unwrap(), 1);
+        let old_workspace = hidden_work_dir(&target, "ytdlp");
+        fs::create_dir_all(&old_workspace).await.unwrap();
+        fs::write(old_workspace.join("movie.mp4.part-Frag1"), b"old fragment")
+            .await
+            .unwrap();
         let service = DownloadService::new(Client::new());
         service
             .download_stream_manifest_to_path(
@@ -937,6 +942,7 @@ mod integration_tests {
             String::from_utf8_lossy(&decoded.stderr)
         );
         assert!(!cache_path(&target).exists());
+        assert!(!old_workspace.exists());
         let _ = fs::remove_dir_all(target.parent().unwrap()).await;
     }
 }
