@@ -1026,24 +1026,6 @@ function isMolystreamEmbedUrl(rawUrl) {
     && url.pathname.startsWith('/embed/'));
 }
 
-function molystreamEmbedForPlayer(playerPageUrl, tabId) {
-  const frames = playerFramesByTab.get(tabId);
-  const pending = [normalizePageUrl(playerPageUrl)];
-  const visited = new Set();
-  const embeds = new Set();
-  while (pending.length && visited.size < 64) {
-    const page = pending.pop();
-    if (!page || visited.has(page)) continue;
-    visited.add(page);
-    if (isMolystreamEmbedUrl(page)) embeds.add(page);
-    if (frames) for (const frame of frames.values()) {
-      if (frame.page === page) pending.push(...frame.children);
-    }
-  }
-  // An ambiguous player may contain both an ad and the main video.
-  return embeds.size === 1 ? [...embeds][0] : null;
-}
-
 // Keep the frame tree reported by our all-frames content script. A selected
 // outer player may embed the actual streaming player on another origin.
 function rememberPlayerFrames(tabId, frameId, pageUrl, embeds) {
@@ -1103,7 +1085,7 @@ function sameMediaAssetPlaylist(candidate, selected) {
 function mediaOptionsForTab(tabId, playerPageUrl = null) {
   const seen = new Set();
   return getMediaCandidatesForTab(tabId)
-    .filter(candidate => !isMolystreamEmbedUrl(candidate.url)
+    .filter(candidate => (!isMolystreamEmbedUrl(candidate.url) || candidate.type === "observed-manifest")
       && ["video", "muxed", "playlist", "master"].includes(candidate.streamKind)
       && (!playerPageUrl || candidateBelongsToPlayer(candidate, playerPageUrl, tabId)))
     .filter(candidate => {
@@ -1167,16 +1149,11 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
 
   const candidates = getMediaCandidatesForTab(tabId).filter(
     (candidate) => candidate.streamKind !== "fragment"
-      && !isMolystreamEmbedUrl(candidate.url)
+      && (!isMolystreamEmbedUrl(candidate.url) || candidate.type === "observed-manifest")
       && (!playerPageUrl || candidateBelongsToPlayer(candidate, playerPageUrl, tabId))
   );
   // Never fall back to extracting the outer page: it may contain a trailer or ad.
   if (playerPageUrl && candidates.length === 0) {
-    const embedUrl = molystreamEmbedForPlayer(playerPageUrl, tabId);
-    if (embedUrl) {
-      return {ok:true,capture:{url:embedUrl,audioUrl:null,sourcePageUrl,
-        sourceTitle,forceYtdlp:true,streamManifest:false}};
-    }
     return { ok: false, error: "The selected player's video stream has not been detected. Reload the page, play the main video, and try again." };
   }
   if (candidates.length === 0) {

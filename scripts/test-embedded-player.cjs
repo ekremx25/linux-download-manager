@@ -35,13 +35,18 @@ assert.equal(vm.runInContext("candidateBelongsToPlayer({referrerUrl:'https://hot
 console.log('PASS: selected player stream wins; trailers and unrelated fallback URLs excluded');
 vm.runInContext("rememberMediaRequest(31,'https://dbx.molystream.org/embed/sheila/example','media','https://dbx.molystream.org/embed/sheila/example')",worker);
 let molystream=vm.runInContext("chooseBestMediaCapturePayload(31,null,'https://yabancidizi.news/dizi/lucky-2026/sezon-1/bolum-1','Lucky','https://dbx.molystream.org/embed/sheila/example')",worker);
-assert.equal(molystream.capture.url,'https://dbx.molystream.org/embed/sheila/example');
-assert.equal(molystream.capture.forceYtdlp,true,'embed page must use extractor instead of direct HTTP');
+assert.equal(molystream.ok,false,'unverified embed page must not be sent to unsupported extractor');
 assert.equal(vm.runInContext("mediaOptionsForTab(31,'https://dbx.molystream.org/embed/sheila/example').length",worker),0,'embed HTML must not appear as a video format');
+vm.runInContext("rememberMediaRequest(31,'https://dbx.molystream.org/embed/sheila/example','observed-manifest','https://dbx.molystream.org/embed/sheila/example')",worker);
+molystream=vm.runInContext("chooseBestMediaCapturePayload(31,null,'https://yabancidizi.news/dizi/lucky-2026/sezon-1/bolum-1','Lucky','https://dbx.molystream.org/embed/sheila/example')",worker);
+assert.equal(molystream.capture.url,'https://dbx.molystream.org/embed/sheila/example');
+assert.equal(molystream.capture.streamManifest,true,'verified HLS response at embed path must be downloaded as a manifest');
+assert.equal(molystream.capture.forceYtdlp,undefined);
+assert.equal(vm.runInContext("mediaOptionsForTab(31,'https://dbx.molystream.org/embed/sheila/example').length",worker),1);
 vm.runInContext("rememberMediaRequest(31,'https://media.example/lucky/master.m3u8','observed-manifest','https://dbx.molystream.org/embed/sheila/example')",worker);
 molystream=vm.runInContext("chooseBestMediaCapturePayload(31,null,'https://yabancidizi.news/dizi/lucky-2026/sezon-1/bolum-1','Lucky','https://dbx.molystream.org/embed/sheila/example')",worker);
 assert.equal(molystream.capture.url,'https://media.example/lucky/master.m3u8','observed stream wins over the embed page');
-console.log('PASS: Molystream embed uses yt-dlp only until its real stream is captured');
+console.log('PASS: Molystream embed HTML is rejected, verified disguised HLS is downloaded as a stream');
 vm.runInContext(`
 rememberMediaRequest(12,'https://cdn.example/video_720p.m3u8','observed-manifest','https://player.example/embed/main');
 rememberMediaRequest(12,'https://cdn.example/video_1080p.m3u8','observed-manifest','https://player.example/embed/main');
@@ -95,14 +100,7 @@ rememberPlayerFrames(2,42,'https://www.dizibox.live/player/king/king.php?v=main'
 rememberPlayerFrames(2,43,'https://dbx.molystream.org/embed/main',[]);
 `,worker);
 chosen=vm.runInContext("chooseBestMediaCapturePayload(2,null,'https://www.dizibox.live/episode','Episode','https://www.dizibox.live/player/king/king.php?v=main')",worker);
-assert.equal(chosen.ok,true,'nested player should be usable before a stream is observed');
-assert.equal(chosen.capture.url,'https://dbx.molystream.org/embed/main');
-assert.equal(chosen.capture.forceYtdlp,true);
-assert.equal(vm.runInContext("molystreamEmbedForPlayer('https://ad.example/embed/ad',2)",worker),null,
-  'sibling ad must not be used as the selected player');
-vm.runInContext("rememberPlayerFrames(3,0,'https://outer.example/player',['https://dbx.molystream.org/embed/main','https://dbx.molystream.org/embed/ad'])",worker);
-assert.equal(vm.runInContext("molystreamEmbedForPlayer('https://outer.example/player',3)",worker),null,
-  'multiple possible embeds must not be guessed');
+assert.equal(chosen.ok,false,'nested player must expose a verified stream before download');
 vm.runInContext(`
 rememberMediaRequest(2,'https://dbx.molystream.org/opaque','observed-manifest','https://dbx.molystream.org/embed/main');
 rememberMediaRequest(2,'https://ad.example/master.m3u8','observed-manifest','https://ad.example/embed/ad');

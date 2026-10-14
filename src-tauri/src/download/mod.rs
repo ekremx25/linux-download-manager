@@ -560,10 +560,9 @@ impl DownloadService {
                 .await;
         }
 
-        // An iframe embed URL is an HTML player page, even when its response
-        // advertises an estimated media size. Never save that page as an MP4
-        // or silently switch to an unknown-size HTTP transfer.
-        if is_embedded_player_page(&url) {
+        // Most embed URLs are HTML pages. A response verified by the browser
+        // as an HLS playlist is an exception, even when served from /embed/.
+        if is_embedded_player_page(&url) && !stream_manifest {
             return self
                 .download_with_ytdlp(
                     &url,
@@ -626,7 +625,7 @@ impl DownloadService {
         }
 
         if stream_manifest || looks_like_stream_manifest_url(&url) {
-            if transfer.connections > 1 {
+            if transfer.connections > 1 && !is_embedded_player_page(&url) {
                 let options = YtdlpOptions {
                     format,
                     use_browser_cookies: false,
