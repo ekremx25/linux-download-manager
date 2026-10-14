@@ -3,6 +3,8 @@
 use super::*;
 use std::sync::atomic::AtomicUsize;
 
+mod dns_fallback;
+
 const PLAYLIST_LIMIT: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, PartialEq)]
@@ -397,7 +399,9 @@ async fn prefetch_playlist(
     let slots = Arc::new(tokio::sync::Semaphore::new(parallel));
     let live = Arc::new(AtomicUsize::new(parallel));
     let streak = Arc::new(AtomicUsize::new(0));
+    let dns = dns_fallback::Fallback::default();
     let jobs = futures_util::stream::iter(urls.into_iter().enumerate().map(|(index, url)| {
+        let dns = &dns;
         let folder = folder.clone();
         let bytes = bytes.clone();
         let credential_origin = credential_origin.clone();
@@ -414,8 +418,7 @@ async fn prefetch_playlist(
             let part = folder.join(format!("segment-{index}.tmp"));
             for attempt in 0..3 {
                 let result = async {
-                    let response = request(client, &url, &credential_origin, headers, referer)
-                        .send()
+                    let response = dns.send(client, &url, &credential_origin, headers, referer)
                         .await
                         .map_err(|_| SegmentFailure::Network)?
                         .error_for_status()
