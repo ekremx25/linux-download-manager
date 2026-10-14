@@ -105,7 +105,7 @@ pub async fn queue_download_request(
         && let Some(asset_id) = molystream_asset_id(&request.url)
     {
         for record in &existing {
-            if !matches!(record.status.as_str(), "queued" | "in_progress" | "paused") {
+            if !matches!(record.status.as_str(), "queued" | "in_progress") {
                 continue;
             }
             let Some(previous) = state.storage.load_resume_job(record.id)? else {
