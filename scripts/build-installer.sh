@@ -16,7 +16,7 @@ mkdir -p dist
 stage="$(mktemp -d)"
 trap 'rm -rf -- "$stage"' EXIT
 package="$stage/$name"
-mkdir -p "$package/bin" "$package/browser/chromium" "$package/browser/firefox" "$package/src-tauri/icons"
+mkdir -p "$package/bin" "$package/browser/chromium" "$package/browser/firefox" "$package/src-tauri/icons" "$package/docs/images"
 for binary in linux-download-manager-custom browser_native_host; do
   install -m 0755 "${CARGO_TARGET_DIR:-$root/target}/release/$binary" "$package/bin/$binary"
 done
@@ -26,6 +26,8 @@ for file in manifest.json service-worker.js player-manifest-observer.js youtube-
 done
 install -m 0644 browser/firefox/manifest.json "$package/browser/firefox/manifest.json"
 install -m 0644 src-tauri/icons/icon.png "$package/src-tauri/icons/icon.png"
+install -m 0644 docs/extension-install-tr.md "$package/docs/extension-install-tr.md"
+install -m 0644 docs/images/chrome-extension-install.svg docs/images/firefox-extension-install.svg "$package/docs/images/"
 cat > "$package/Install.desktop" <<'DESKTOP'
 [Desktop Entry]
 Type=Application
@@ -82,7 +84,8 @@ Linux Download Manager
    ~/Documents/Linux Download Manager Firefox Extension.zip
    Normal Firefox needs a Mozilla-signed add-on for permanent installation.
 6. Chrome stays in its unpacked folder; Firefox has one ZIP in ~/Documents/.
-   Visual instructions: https://github.com/ekremx25/linux-download-manager/blob/main/docs/extension-install-tr.md
+   Visual instructions: docs/extension-install-tr.md
+   Online: https://github.com/ekremx25/linux-download-manager/blob/main/docs/extension-install-tr.md
 
 This prebuilt package is for x86_64 Linux. No Rust compiler is required.
 GTK3, WebKitGTK 4.1 and compatible system libraries are required. Binaries built
