@@ -310,19 +310,11 @@ pub(super) async fn prepare_parallel(
         return Ok(None);
     };
     let cache = cache_path(target);
-    let mut prefetched = prefetch_playlist(
+    let Some((playlist, _, _)) = prefetch_playlist(
         client, url, headers, referer, &base, &text, &cache, parallel, progress,
-    ).await?;
-    // A burst of requests can make a CDN reject one segment even though the
-    // already fetched segments are valid. Reuse them and retry with a smaller
-    // connection ceiling before giving up to FFmpeg's sequential network path.
-    if prefetched.is_none() && parallel > 4 {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        prefetched = prefetch_playlist(
-            client, url, headers, referer, &base, &text, &cache, 4, progress,
-        ).await?;
-    }
-    let Some((playlist, _, _)) = prefetched else {
+    )
+    .await?
+    else {
         return Ok(None);
     };
     // NOTE: audio streams are left to FFmpeg.  When a CDN limits the audio
@@ -644,9 +636,6 @@ mod integration_tests {
             Self::start_count(segment, 8)
         }
         fn start_count(segment: Vec<u8>, count: usize) -> Self {
-            Self::start_count_flaky(segment, count, false)
-        }
-        fn start_count_flaky(segment: Vec<u8>, count: usize, flaky: bool) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let url = Url::parse(&format!(
@@ -657,9 +646,8 @@ mod integration_tests {
             let requests = Arc::new(AtomicUsize::new(0));
             let active = Arc::new(AtomicUsize::new(0));
             let peak = Arc::new(AtomicUsize::new(0));
-            let failures = Arc::new(AtomicUsize::new(0));
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (r, a, p, s, f) = (requests.clone(), active, peak.clone(), stop.clone(), failures);
+            let (r, a, p, s) = (requests.clone(), active, peak.clone(), stop.clone());
             let thread = std::thread::spawn(move || {
                 let mut workers = Vec::new();
                 while !s.load(Ordering::Relaxed) {
@@ -667,7 +655,7 @@ mod integration_tests {
                         std::thread::sleep(Duration::from_millis(5));
                         continue;
                     };
-                    let (r, a, p, f, segment) = (r.clone(), a.clone(), p.clone(), f.clone(), segment.clone());
+                    let (r, a, p, segment) = (r.clone(), a.clone(), p.clone(), segment.clone());
                     workers.push(std::thread::spawn(move || {
                         socket
                             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -675,7 +663,6 @@ mod integration_tests {
                         let mut input = [0; 4096];
                         let n = socket.read(&mut input).unwrap_or(0);
                         let header = String::from_utf8_lossy(&input[..n]);
-                        let mut status = 200;
                         let body = if header.starts_with("GET /unreachable.m3u8 ") {
                             b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nhttp://127.0.0.1:0/unreachable.ts\n#EXT-X-ENDLIST\n".to_vec()
                         } else if header.starts_with("GET /playlist.m3u8 ") {
@@ -690,21 +677,15 @@ mod integration_tests {
                             .into_bytes()
                         } else {
                             r.fetch_add(1, Ordering::Relaxed);
-                            if flaky && header.starts_with("GET /segment-0.ts ")
-                                && f.fetch_add(1, Ordering::Relaxed) < 3 {
-                                status = 429;
-                                Vec::new()
-                            } else {
                             let current = a.fetch_add(1, Ordering::Relaxed) + 1;
                             p.fetch_max(current, Ordering::Relaxed);
                             std::thread::sleep(Duration::from_millis(120));
                             a.fetch_sub(1, Ordering::Relaxed);
                             segment
-                            }
                         };
                         let _ = write!(
                             socket,
-                            "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             body.len()
                         );
                         let _ = socket.write_all(&body);
@@ -752,19 +733,6 @@ mod integration_tests {
         .unwrap();
         assert_eq!(fixture.peak.load(Ordering::Relaxed), 10);
         assert_eq!(fixture.requests.load(Ordering::Relaxed), 20);
-        prepared.cleanup().await;
-        let _ = fs::remove_dir_all(target.parent().unwrap()).await;
-    }
-
-    #[tokio::test]
-    async fn failed_parallel_segment_retries_with_cached_segments_at_four_connections() {
-        let fixture = Fixture::start_count_flaky(vec![7; 4096], 12, true);
-        let target = test_target("retry-lower-concurrency");
-        let prepared = prepare_parallel(
-            &Client::new(), &fixture.url, &target, &HashMap::new(), None, 10,
-            &mut |_| Ok(()),
-        ).await.unwrap().expect("second attempt should reuse the cache and complete");
-        assert_eq!(fixture.requests.load(Ordering::Relaxed), 15);
         prepared.cleanup().await;
         let _ = fs::remove_dir_all(target.parent().unwrap()).await;
     }
