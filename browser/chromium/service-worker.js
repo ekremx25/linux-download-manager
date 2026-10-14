@@ -1020,6 +1020,12 @@ function canTryYtdlpPage(pageUrl) {
     && !/(^|\.)yabancidizi\.news$/i.test(parsedUrl.hostname));
 }
 
+function isMolystreamEmbedUrl(rawUrl) {
+  const url = safeParseUrl(rawUrl);
+  return Boolean(url && /(^|\.)molystream\.org$/i.test(url.hostname)
+    && url.pathname.startsWith('/embed/'));
+}
+
 // Keep the frame tree reported by our all-frames content script. A selected
 // outer player may embed the actual streaming player on another origin.
 function rememberPlayerFrames(tabId, frameId, pageUrl, embeds) {
@@ -1079,7 +1085,8 @@ function sameMediaAssetPlaylist(candidate, selected) {
 function mediaOptionsForTab(tabId, playerPageUrl = null) {
   const seen = new Set();
   return getMediaCandidatesForTab(tabId)
-    .filter(candidate => ["video", "muxed", "playlist", "master"].includes(candidate.streamKind)
+    .filter(candidate => !isMolystreamEmbedUrl(candidate.url)
+      && ["video", "muxed", "playlist", "master"].includes(candidate.streamKind)
       && (!playerPageUrl || candidateBelongsToPlayer(candidate, playerPageUrl, tabId)))
     .filter(candidate => {
       const parsed = safeParseUrl(candidate.url);
@@ -1142,10 +1149,15 @@ function chooseBestMediaCapturePayload(tabId, preferredUrl, sourcePageUrl, sourc
 
   const candidates = getMediaCandidatesForTab(tabId).filter(
     (candidate) => candidate.streamKind !== "fragment"
+      && !isMolystreamEmbedUrl(candidate.url)
       && (!playerPageUrl || candidateBelongsToPlayer(candidate, playerPageUrl, tabId))
   );
   // Never fall back to extracting the outer page: it may contain a trailer or ad.
   if (playerPageUrl && candidates.length === 0) {
+    if (isMolystreamEmbedUrl(playerPageUrl)) {
+      return {ok:true,capture:{url:playerPageUrl,audioUrl:null,sourcePageUrl,
+        sourceTitle,forceYtdlp:true,streamManifest:false}};
+    }
     return { ok: false, error: "The selected player's video stream has not been detected. Reload the page, play the main video, and try again." };
   }
   if (candidates.length === 0) {

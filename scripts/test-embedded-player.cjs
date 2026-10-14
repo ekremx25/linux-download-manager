@@ -33,6 +33,15 @@ assert.equal(chosen.capture.sourcePageUrl,'https://hotstream.club/embed/main');
 assert.deepEqual(Array.from(chosen.capture.fallbackUrls),[],'trailer must not become a fallback');
 assert.equal(vm.runInContext("candidateBelongsToPlayer({referrerUrl:'https://hotstream.club/embed/other'},'https://hotstream.club/embed/main')",worker),false);
 console.log('PASS: selected player stream wins; trailers and unrelated fallback URLs excluded');
+vm.runInContext("rememberMediaRequest(31,'https://dbx.molystream.org/embed/sheila/example','media','https://dbx.molystream.org/embed/sheila/example')",worker);
+let molystream=vm.runInContext("chooseBestMediaCapturePayload(31,null,'https://yabancidizi.news/dizi/lucky-2026/sezon-1/bolum-1','Lucky','https://dbx.molystream.org/embed/sheila/example')",worker);
+assert.equal(molystream.capture.url,'https://dbx.molystream.org/embed/sheila/example');
+assert.equal(molystream.capture.forceYtdlp,true,'embed page must use extractor instead of direct HTTP');
+assert.equal(vm.runInContext("mediaOptionsForTab(31,'https://dbx.molystream.org/embed/sheila/example').length",worker),0,'embed HTML must not appear as a video format');
+vm.runInContext("rememberMediaRequest(31,'https://media.example/lucky/master.m3u8','observed-manifest','https://dbx.molystream.org/embed/sheila/example')",worker);
+molystream=vm.runInContext("chooseBestMediaCapturePayload(31,null,'https://yabancidizi.news/dizi/lucky-2026/sezon-1/bolum-1','Lucky','https://dbx.molystream.org/embed/sheila/example')",worker);
+assert.equal(molystream.capture.url,'https://media.example/lucky/master.m3u8','observed stream wins over the embed page');
+console.log('PASS: Molystream embed uses yt-dlp only until its real stream is captured');
 vm.runInContext(`
 rememberMediaRequest(12,'https://cdn.example/video_720p.m3u8','observed-manifest','https://player.example/embed/main');
 rememberMediaRequest(12,'https://cdn.example/video_1080p.m3u8','observed-manifest','https://player.example/embed/main');

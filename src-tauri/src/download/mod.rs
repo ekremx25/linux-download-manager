@@ -301,7 +301,7 @@ impl DownloadService {
     async fn inspect_inner(&self, raw_url: &str) -> Result<DownloadMetadata, String> {
         let url = validate_url(raw_url)?;
 
-        if is_ytdlp_supported_page(url.as_str()) || is_ytdlp_supported_cdn(&url) {
+        if is_ytdlp_supported_page(url.as_str()) || is_ytdlp_supported_cdn(&url) || is_embedded_player_page(&url) {
             let file_name = derive_ytdlp_file_name(&url);
             return Ok(DownloadMetadata {
                 source_url: url.as_str().to_string(),
@@ -546,6 +546,27 @@ impl DownloadService {
             return self
                 .download_with_ytdlp(
                     &media_url,
+                    target_path,
+                    YtdlpOptions {
+                        format,
+                        use_browser_cookies: false,
+                        transfer: &transfer,
+                        bandwidth_limit_kbps,
+                        http_headers: Some(http_headers),
+                    },
+                    &mut on_started,
+                    &mut on_progress,
+                )
+                .await;
+        }
+
+        // An iframe embed URL is an HTML player page, even when its response
+        // advertises an estimated media size. Never save that page as an MP4
+        // or silently switch to an unknown-size HTTP transfer.
+        if is_embedded_player_page(&url) {
+            return self
+                .download_with_ytdlp(
+                    &url,
                     target_path,
                     YtdlpOptions {
                         format,
@@ -2133,11 +2154,18 @@ fn is_ytdlp_supported_cdn(url: &Url) -> bool {
         || host.ends_with(".redd.it")
 }
 
+fn is_embedded_player_page(url: &Url) -> bool {
+    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+    (host == "molystream.org" || host.ends_with(".molystream.org"))
+        && url.path().starts_with("/embed/")
+}
+
 pub(crate) fn is_media_source(raw: &str) -> bool {
     validate_url(raw)
         .map(|u| {
             is_ytdlp_supported_page(raw)
                 || is_ytdlp_supported_cdn(&u)
+                || is_embedded_player_page(&u)
                 || looks_like_stream_manifest_url(&u)
         })
         .unwrap_or(false)
@@ -3229,6 +3257,14 @@ mod ytdlp_detection_tests {
 
     fn host_url(url: &str) -> Url {
         Url::parse(url).expect("test URL must parse")
+    }
+
+    #[test]
+    fn molystream_embed_is_a_player_page_not_a_direct_file() {
+        assert!(is_embedded_player_page(&host_url("https://dbx.molystream.org/embed/sheila/episode")));
+        assert!(is_media_source("https://dbx.molystream.org/embed/sheila/episode"));
+        assert!(!is_embedded_player_page(&host_url("https://media.molystream.org/video.mp4")));
+        assert!(!is_embedded_player_page(&host_url("https://molystream.org.evil.example/embed/x")));
     }
 
     // Regression coverage for Reddit support. Reddit URLs used to fall through
