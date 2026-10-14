@@ -369,7 +369,7 @@ final_instructions() {
   echo "  Firefox test: about:debugging → This Firefox → Load Temporary Add-on"
   echo "     Select: ${BOLD}${FIREFOX_ZIP}${RESET}"
   echo "     A signed Firefox add-on is required for installation that survives a restart."
-  echo "  Visual guide: ${BOLD}https://github.com/ekremx25/linux-download-manager/blob/main/docs/extension-install-tr.md${RESET}"
+  echo "  Visual guide: ${BOLD}https://github.com/ekremx25/linux-download-manager/blob/main/docs/extension-install-en.md${RESET}"
   echo
   printf '  Uninstall: bash "%s/uninstall.sh"\n' "$APP_DATA_DIR"
   echo
