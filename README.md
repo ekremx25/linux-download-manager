@@ -58,11 +58,11 @@ Choose speed limits, connections per file, startup behavior and video preference
 
 ### Portable AppImage
 
-Download **Linux_Download_Manager-0.2.3-x86_64.AppImage** from [Releases](https://github.com/ekremx25/linux-download-manager/releases/latest), allow it to run as a program in your file manager, then open it. From a terminal:
+Download **Linux_Download_Manager-0.2.4-x86_64.AppImage** from [Releases](https://github.com/ekremx25/linux-download-manager/releases/latest), allow it to run as a program in your file manager, then open it. From a terminal:
 
 ```bash
-chmod +x Linux_Download_Manager-0.2.3-x86_64.AppImage
-./Linux_Download_Manager-0.2.3-x86_64.AppImage
+chmod +x Linux_Download_Manager-0.2.4-x86_64.AppImage
+./Linux_Download_Manager-0.2.4-x86_64.AppImage
 ```
 
 This is one x86_64 package built on Ubuntu 22.04 for use on Ubuntu 22.04+ and compatible current Arch/Fedora systems. It is not a separate package for each distribution. Build and payload checks run on Ubuntu 22.04; startup and browser integration were smoke-tested on Arch Linux. Fedora has not been tested directly. Other CPU architectures are not included.
@@ -70,7 +70,7 @@ This is one x86_64 package built on Ubuntu 22.04 for use on Ubuntu 22.04+ and co
 If your system lacks FUSE support, run:
 
 ```bash
-./Linux_Download_Manager-0.2.3-x86_64.AppImage --appimage-extract-and-run
+./Linux_Download_Manager-0.2.4-x86_64.AppImage --appimage-extract-and-run
 ```
 
 Keep the AppImage in a permanent folder such as `~/Applications`. Browser integration and **Start LDM when I sign in** use its path. If you move it, run it from its new location and re-save the startup option. The app copies the bundled extension to your Documents folder; complete [browser setup](#browser-setup) once. Video conversion also needs FFmpeg; yt-dlp and its JavaScript runtime must be available for sites that require them.

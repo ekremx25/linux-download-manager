@@ -215,3 +215,36 @@ attached[0].isConnected=false;
 vm.runInContext('refreshMediaOverlay()',c);
 assert.equal(attached[0].isConnected,true,'a removed button must be reattached');
 console.log('PASS: embed button renders without generic scanning, persists without duplicates, and captures current player');
+
+// Generic iframe paths become controllable only after a video stream is
+// attributed to that frame. Unrelated ad and audio streams must not qualify.
+vm.runInContext(`
+rememberPlayerFrames(77,0,'https://movies.example/watch',['https://cdn.player.example/v/opaque','https://ads.example/view']);
+rememberPlayerFrames(77,1,'https://cdn.player.example/v/opaque',[]);
+rememberPlayerFrames(77,2,'https://ads.example/view',[]);
+rememberMediaRequest(77,'https://stream.example/main.m3u8','observed-manifest','https://cdn.player.example/v/opaque');
+rememberMediaRequest(77,'https://ads.example/sound.mp3','audio','https://ads.example/view');
+`,worker);
+const detected=vm.runInContext('detectedPlayerPagesForTab(77)',worker);
+assert.equal(detected.includes('https://cdn.player.example/v/opaque'),true);
+assert.equal(detected.includes('https://ads.example/view'),false);
+vm.runInContext("detectedPlayerPages=new Set(['https://cdn.player.example/v/opaque'])",c);
+assert.equal(get(frame('https://cdn.player.example/v/opaque',690,388,100)).kind,'media-fallback');
+assert.equal(get(frame('https://ads.example/view',690,388,100)),null);
+vm.runInContext("rememberPlayerFrames(77,1,'https://cdn.player.example/v/changed',[])",worker);
+assert.equal(vm.runInContext('detectedPlayerPagesForTab(77)',worker).includes('https://cdn.player.example/v/changed'),false);
+console.log('PASS: generic player frame recognized from its video stream; ad and stale frame excluded');
+
+// The background response must trigger a fresh overlay scan after playback,
+// without requiring a site-specific player URL or page refresh.
+let overlayScheduled=0;
+c.chrome={runtime:{lastError:null}};
+c.window.top=c.window;
+c.scheduleMediaOverlayRefresh=()=>{overlayScheduled++;};
+c.sendExtensionMessage=(_message,callback)=>callback({ok:true,
+ candidates:[{url:'https://stream.example/main.m3u8'}],
+ detectedPlayerPages:['https://cdn.player.example/v/opaque']});
+vm.runInContext('detectedPlayerPages.clear(); refreshRecentMediaCandidates()',c);
+assert.equal(vm.runInContext("detectedPlayerPages.has('https://cdn.player.example/v/opaque')",c),true);
+assert.equal(overlayScheduled,1);
+console.log('PASS: network video detection refreshes generic player overlay after playback');

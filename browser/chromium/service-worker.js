@@ -228,6 +228,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "get-media-candidates") {
     sendResponse({
       ok: true,
+      detectedPlayerPages: detectedPlayerPagesForTab(tabId),
       candidates: getMediaCandidatesForTab(tabId)
     });
     return;
@@ -916,6 +917,17 @@ function rememberPlayerFrames(tabId, frameId, pageUrl, embeds) {
   const frames = playerFramesByTab.get(tabId);
   frames.set(frameId, {page, children: embeds.slice(0, 12).map(normalizePageUrl).filter(Boolean)});
   if (frames.size > 64) frames.delete(frames.keys().next().value);
+}
+
+function detectedPlayerPagesForTab(tabId) {
+  const frames = playerFramesByTab.get(tabId);
+  if (!frames) return [];
+  const candidates = getMediaCandidatesForTab(tabId).filter(candidate =>
+    ["video", "muxed", "playlist", "master"].includes(candidate.streamKind));
+  if (!candidates.length) return [];
+  return [...new Set([...frames.values()]
+    .map(frame => frame.page)
+    .filter(page => candidates.some(candidate => candidateBelongsToPlayer(candidate, page, tabId))))];
 }
 
 function candidateBelongsToPlayer(candidate, playerPageUrl, tabId) {

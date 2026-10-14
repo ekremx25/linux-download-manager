@@ -56,6 +56,7 @@ let hoverButton = null;
 let activeCandidate = null;
 let reportTimer = null;
 let recentMediaCandidates = [];
+let detectedPlayerPages = new Set();
 let mediaOverlayRoot = null;
 let mediaRefreshTimer = null;
 let mediaScanTimer = null;
@@ -1254,7 +1255,8 @@ function candidateFromPlayerFrame(frame) {
   const path = parsed.pathname;
   const rapidvidPlayer = /(^|\.)rapidvid\.org$/i.test(parsed.hostname)
     && /^\/vx\/[^/]+\/?$/.test(path);
-  if (!rapidvidPlayer && !/(?:^|\/)(?:embed|player)(?:[/.]|$)/i.test(path)) return null;
+  if (!rapidvidPlayer && !detectedPlayerPages.has(url)
+      && !/(?:^|\/)(?:embed|player)(?:[/.]|$)/i.test(path)) return null;
   const rect = frame.getBoundingClientRect();
   if (rect.width < 180 || rect.height < 120 || !isVisibleMediaRect(rect)) return null;
   // An embed page is HTML, not the downloadable media URL.
@@ -1805,6 +1807,8 @@ function refreshRecentMediaCandidates() {
     recentMediaCandidates = response.candidates
       .map((candidate) => normalizeUrl(candidate?.url))
       .filter(Boolean);
+    detectedPlayerPages = new Set((response.detectedPlayerPages ?? []).map(normalizeUrl).filter(Boolean));
+    if (window === window.top) scheduleMediaOverlayRefresh();
   });
 }
 
