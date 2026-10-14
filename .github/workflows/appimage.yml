@@ -1,4 +1,4 @@
-name: Build AppImage
+name: Build Linux packages
 on:
   workflow_dispatch:
 permissions:
@@ -36,11 +36,26 @@ jobs:
           test -x squashfs-root/usr/bin/browser_native_host
           find squashfs-root -name youtube-audio-observer.js | grep .
           mkdir -p dist
-          cp "$image" dist/Linux_Download_Manager-0.2.1-x86_64.AppImage
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          embedded=$(find squashfs-root -path '*/chromium/manifest.json' -print -quit)
+          test -n "$embedded"
+          cmp browser/chromium/manifest.json "$embedded"
+          cmp browser/chromium/content-script.js "$(dirname "$embedded")/content-script.js"
+          cp "$image" "dist/Linux_Download_Manager-${version}-x86_64.AppImage"
           cd dist
           sha256sum *.AppImage > SHA256SUMS-AppImage
+      - name: Build and verify installer archive
+        run: |
+          bash scripts/build-installer.sh --skip-build
+          mkdir installer-check
+          tar -xzf dist/LinuxDownloadManager-*-linux-x86_64.tar.gz -C installer-check
+          package=$(find installer-check -mindepth 1 -maxdepth 1 -type d -print -quit)
+          (cd "$package" && sha256sum -c SHA256SUMS)
+          cmp browser/chromium/content-script.js "$package/browser/chromium/content-script.js"
+          cd dist
+          sha256sum *.AppImage *.tar.gz > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: Linux-Download-Manager-AppImage
+          name: Linux-Download-Manager-Packages
           path: dist/
           if-no-files-found: error
