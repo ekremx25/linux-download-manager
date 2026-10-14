@@ -884,20 +884,39 @@ impl DownloadService {
         // Some HLS providers publish the playlist a moment after playback starts.
         // A short retry turns their transient 404 into a normal download.
         'playlists: for playlist_url in playlist_urls {
-            let prepared = hls::prepare_parallel(
-                &self.client,
-                playlist_url,
-                target_path,
-                http_headers,
-                source_page_url,
-                if transfer.connections == 0 {
-                    4
-                } else {
-                    transfer.connections
-                },
-                on_progress,
-            )
-            .await?;
+            let configured_parallel = if transfer.connections == 0 {
+                4
+            } else {
+                transfer.connections
+            };
+            let mut prepared = None;
+            // A burst can make a CDN reject one fragment even though most
+            // fragments succeeded. Reuse the cached ones and retry the rest
+            // with fewer simultaneous requests before falling back to FFmpeg.
+            for (attempt, parallel) in [configured_parallel, configured_parallel.min(4)]
+                .into_iter()
+                .enumerate()
+            {
+                if prepared.is_some() {
+                    break;
+                }
+                if attempt > 0 {
+                    if parallel == configured_parallel {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                prepared = hls::prepare_parallel(
+                    &self.client,
+                    playlist_url,
+                    target_path,
+                    http_headers,
+                    source_page_url,
+                    parallel,
+                    on_progress,
+                )
+                .await?;
+            }
             if prepared.is_none() {
                 // Reset any prefetch estimate before the network fallback starts.
                 on_started(0, None, 1)?;
