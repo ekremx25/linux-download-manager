@@ -93,6 +93,17 @@ rememberPlayerFrames(2,0,'https://www.dizibox.live/episode',[
 rememberPlayerFrames(2,42,'https://www.dizibox.live/player/king/king.php?v=main',[
   'https://dbx.molystream.org/embed/main']);
 rememberPlayerFrames(2,43,'https://dbx.molystream.org/embed/main',[]);
+`,worker);
+chosen=vm.runInContext("chooseBestMediaCapturePayload(2,null,'https://www.dizibox.live/episode','Episode','https://www.dizibox.live/player/king/king.php?v=main')",worker);
+assert.equal(chosen.ok,true,'nested player should be usable before a stream is observed');
+assert.equal(chosen.capture.url,'https://dbx.molystream.org/embed/main');
+assert.equal(chosen.capture.forceYtdlp,true);
+assert.equal(vm.runInContext("molystreamEmbedForPlayer('https://ad.example/embed/ad',2)",worker),null,
+  'sibling ad must not be used as the selected player');
+vm.runInContext("rememberPlayerFrames(3,0,'https://outer.example/player',['https://dbx.molystream.org/embed/main','https://dbx.molystream.org/embed/ad'])",worker);
+assert.equal(vm.runInContext("molystreamEmbedForPlayer('https://outer.example/player',3)",worker),null,
+  'multiple possible embeds must not be guessed');
+vm.runInContext(`
 rememberMediaRequest(2,'https://dbx.molystream.org/opaque','observed-manifest','https://dbx.molystream.org/embed/main');
 rememberMediaRequest(2,'https://ad.example/master.m3u8','observed-manifest','https://ad.example/embed/ad');
 `,worker);
