@@ -521,14 +521,25 @@ impl AppState {
         Ok(())
     }
 
-    pub fn cancel_download(&self, id: i64) -> Result<(), String> {
-        let mut queue = self.queue.lock().unwrap();
-        if let Some(handle) = queue.active.remove(&id) {
+    pub async fn cancel_download(&self, id: i64) -> Result<(), String> {
+        let handle = {
+            let mut queue = self.queue.lock().unwrap();
+            queue.pending.retain(|job| job.id != id);
+            queue.active.remove(&id)
+        };
+        if let Some(handle) = handle {
             handle.abort();
+            // Temporary files are removed by the command after this returns.
+            // Wait for the writer so it cannot recreate them afterward.
+            let _ = handle.await;
         }
-        queue.pending.retain(|job| job.id != id);
-        drop(queue);
         let record = self.storage.get_download(id)?;
+        if !matches!(
+            record.status.as_str(),
+            "in_progress" | "queued" | "scheduled" | "paused" | "failed"
+        ) {
+            return Err("Only active, paused, or failed downloads can be cancelled".into());
+        }
         self.storage.set_status(
             id,
             "cancelled",
@@ -1076,6 +1087,42 @@ mod pause_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn cancellation_waits_for_the_writer_before_file_cleanup() {
+        let dir = test_dir("cancel-writer");
+        let state = state_at(&dir);
+        let target = dir.join("video.mp4");
+        let record = state.storage.insert_download(NewDownloadRecord {
+            url: "https://example.com/video.mp4".into(),
+            file_name: "video.mp4".into(),
+            save_path: target.clone(),
+            total_bytes: None,
+            expected_checksum: None,
+            scheduled_at: None,
+            bandwidth_limit_kbps: None,
+            category: "video".into(),
+        }).unwrap();
+        state.storage.set_status(record.id, "in_progress", 0, None, None).unwrap();
+        struct WriterGuard(Arc<AtomicBool>);
+        impl Drop for WriterGuard {
+            fn drop(&mut self) { self.0.store(true, Ordering::SeqCst); }
+        }
+        let stopped = Arc::new(AtomicBool::new(false));
+        let guard = WriterGuard(stopped.clone());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tauri::async_runtime::spawn(async move {
+            let _guard = guard;
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        state.queue.lock().unwrap().active.insert(record.id, handle);
+        started_rx.await.unwrap();
+        state.cancel_download(record.id).await.unwrap();
+        assert!(stopped.load(Ordering::SeqCst));
+        assert_eq!(state.storage.get_download(record.id).unwrap().status, "cancelled");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The preference must default to ON so existing users keep today's

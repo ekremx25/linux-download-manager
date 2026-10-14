@@ -192,7 +192,7 @@ pub async fn cancel_download(
     state: State<'_, AppState>,
     id: i64,
 ) -> Result<(), String> {
-    state.cancel_download(id)?;
+    state.cancel_download(id).await?;
     let record = state.storage.get_download(id)?;
     let _ = state
         .download_service
@@ -345,7 +345,8 @@ pub async fn delete_download_files(state: State<'_, AppState>, id: i64) -> Resul
         record.status.as_str(),
         "in_progress" | "queued" | "scheduled"
     ) {
-        return Err("Pause the download before deleting its files".to_string());
+        // Pause waits for an active writer to exit before deleting its output.
+        state.pause_download(id).await?;
     }
     state
         .download_service

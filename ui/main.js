@@ -15,6 +15,7 @@ const $=id=>document.getElementById(id);
 const merged=d=>({...d,...state.live.get(d.id)});
 const canPause=d=>['in_progress','queued','scheduled'].includes(d.status);
 const canResume=d=>['paused','failed'].includes(d.status);
+const canCancel=d=>canPause(d)||canResume(d);
 let listLoading=false,lastList='',actionBusy=false;
 
 document.addEventListener('DOMContentLoaded',async()=>{
@@ -53,6 +54,8 @@ function bind(){
   $('open-folder').onclick=()=>safe(()=>invoke('open_download_folder',{id:null}));
   $('pause-selected').onclick=()=>batch('pause_download',true);
   $('resume-selected').onclick=()=>batch('resume_download',true);
+  $('cancel-selected').onclick=()=>batch('cancel_download',true);
+  $('delete-selected').onclick=()=>deleteSelectedFiles();
   $('clear-selection').onclick=()=>{state.selected.clear();render();};
   $('select-all').onchange=e=>{for(const d of filtered()){if(e.target.checked)state.selected.add(d.id);else state.selected.delete(d.id);}render();};
   document.addEventListener('contextmenu',e=>{const row=e.target.closest?.('.download-row.item');if(row){e.preventDefault();openContextMenu(Number(row.dataset.id),e.clientX,e.clientY);}});
@@ -100,7 +103,7 @@ async function loadDownloads(){
 }
 async function batch(command,selectedOnly=false){
   if(actionBusy)return;actionBusy=true;updateSelection();
-  const eligible=command==='pause_download'?canPause:canResume;
+  const eligible=command==='pause_download'?canPause:command==='cancel_download'?canCancel:canResume;
   const targets=state.downloads.map(merged).filter(d=>eligible(d)&&(!selectedOnly||state.selected.has(d.id)));
   const failures=[];
   for(const d of targets){try{await invoke(command,{id:d.id});}catch(e){failures.push(`${d.fileName}: ${e}`);}}
@@ -149,6 +152,7 @@ function updateSelection(){
   $('selection-bar').hidden=selected.length===0;$('selected-count').textContent=`${selected.length} files selected`;
   $('select-all').checked=visible.length>0&&visible.every(d=>state.selected.has(d.id));$('select-all').indeterminate=visible.some(d=>state.selected.has(d.id))&&!$('select-all').checked;
   $('pause-selected').disabled=actionBusy||!selected.some(canPause);$('resume-selected').disabled=actionBusy||!selected.some(canResume);
+  $('cancel-selected').disabled=actionBusy||!selected.some(canCancel);$('delete-selected').disabled=actionBusy||selected.length===0;
   $('stop-all').disabled=actionBusy||!state.downloads.map(merged).some(canPause);$('start-queue').disabled=actionBusy||!state.downloads.map(merged).some(canResume);
 }
 function focusAdjacentRow(direction){const rows=[...document.querySelectorAll('.download-row.item')];if(!rows.length)return;const current=rows.indexOf(document.activeElement.closest?.('.download-row.item'));const next=current<0?(direction>0?0:rows.length-1):(current+direction+rows.length)%rows.length;rows[next].focus();}
@@ -177,7 +181,8 @@ async function clearDownload(id){
   const d=state.downloads.find(d=>d.id===id);if(!d||canPause(merged(d)))return;
   try{await invoke('clear_download',{id});state.live.delete(id);state.selected.delete(id);lastList='';await loadDownloads();}catch(e){setNotice($('notice'),String(e),'error');}
 }
-function confirmFileDeletion(fileName){
+function confirmFileDeletion(fileNames){
+  const names=Array.isArray(fileNames)?fileNames:[fileNames],many=names.length>1;
   return new Promise(resolve=>{
     const dialog=document.createElement('dialog');dialog.className='delete-confirm';
     dialog.setAttribute('aria-labelledby','delete-dialog-title');
@@ -197,15 +202,31 @@ function confirmFileDeletion(fileName){
         <button value="cancel" class="delete-dialog-cancel" autofocus>Keep file</button>
         <button value="delete" class="delete-dialog-submit">Delete file</button>
       </form>`;
-    dialog.querySelector('.delete-file-name').textContent=fileName;
+    dialog.querySelector('#delete-dialog-title').textContent=many?`Delete ${names.length} downloads?`:'Delete this download?';
+    dialog.querySelector('#delete-dialog-description').textContent=many?'The selected files and their temporary data will be permanently deleted and removed from your list. Active downloads will stop first.':'The file and its temporary data will be permanently deleted and removed from your list. An active download will stop first.';
+    dialog.querySelector('.delete-file-label').textContent=many?'SELECTED FILES':'SELECTED FILE';
+    dialog.querySelector('.delete-file-name').textContent=names.slice(0,5).join('\n')+(names.length>5?`\n…and ${names.length-5} more`:'');
+    dialog.querySelector('.delete-dialog-submit').textContent=many?`Delete ${names.length} files`:'Delete file';
     dialog.addEventListener('close',()=>{const confirmed=dialog.returnValue==='delete';dialog.remove();resolve(confirmed);},{once:true});
     document.body.appendChild(dialog);dialog.showModal();
   });
 }
 async function deleteDownloadFiles(id){
-  const d=state.downloads.find(d=>d.id===id);if(!d||canPause(merged(d)))return;
-  if(!await confirmFileDeletion(d.fileName))return;
-  try{await invoke('delete_download_files',{id});state.live.delete(id);state.selected.delete(id);lastList='';await loadDownloads();}catch(e){setNotice($('notice'),String(e),'error');}
+  await deleteFiles([id]);
+}
+async function deleteSelectedFiles(){await deleteFiles([...state.selected]);}
+async function deleteFiles(ids){
+  if(actionBusy)return;
+  const targets=ids.map(id=>state.downloads.find(d=>d.id===id)).filter(Boolean);
+  if(!targets.length||!await confirmFileDeletion(targets.map(d=>d.fileName)))return;
+  actionBusy=true;updateSelection();
+  const failures=[];
+  for(const d of targets){
+    try{await invoke('delete_download_files',{id:d.id});state.live.delete(d.id);state.selected.delete(d.id);}
+    catch(e){failures.push(`${d.fileName}: ${e}`);}
+  }
+  actionBusy=false;lastList='';await loadDownloads();updateSelection();
+  setNotice($('notice'),failures.length?failures.join('\n'):`${targets.length} files deleted and removed from the list.`,failures.length?'error':'');
 }
 function ensureContextMenu(){
   let menu=$('context-menu');if(menu)return menu;menu=document.createElement('div');menu.id='context-menu';menu.className='context-menu';menu.hidden=true;menu.setAttribute('role','menu');document.body.appendChild(menu);
@@ -213,7 +234,7 @@ function ensureContextMenu(){
 }
 function openContextMenu(id,x,y){
   const d=state.downloads.find(d=>d.id===id);if(!d)return;const row=merged(d),menu=ensureContextMenu();state.contextMenuId=id;
-  const items=[['detail','Show details',true],['folder','Show in folder',true],['pause_download','Pause',canPause(row)],['resume_download','Resume / retry',canResume(row)],['cancel_download','Cancel download',canPause(row)||canResume(row)],['clear','Remove from list (keep file)',!canPause(row)],['delete-files','Delete files and remove from list',!canPause(row)]];
+  const items=[['detail','Show details',true],['folder','Show in folder',true],['pause_download','Pause',canPause(row)],['resume_download','Resume / retry',canResume(row)],['cancel_download','Cancel download',canCancel(row)],['clear','Remove from list (keep file)',!canPause(row)],['delete-files','Delete files and remove from list',true]];
   menu.innerHTML=items.map(([a,t,enabled])=>`<button role="menuitem" data-menu-action="${a}" ${enabled?'':'disabled'}>${t}</button>`).join('');menu.hidden=false;menu.style.left=`${Math.max(6,Math.min(x,window.innerWidth-menu.offsetWidth-6))}px`;menu.style.top=`${Math.max(6,Math.min(y,window.innerHeight-menu.offsetHeight-6))}px`;
 }
 function hideContextMenu(){const menu=$('context-menu');if(menu)menu.hidden=true;state.contextMenuId=null;}

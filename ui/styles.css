@@ -46,6 +46,7 @@ button:disabled{cursor:default;opacity:.45}button,input,select{font:inherit}inpu
 .delete-dialog-actions{display:flex;justify-content:flex-end;gap:10px;margin:0;padding:18px 28px;border-top:1px solid var(--border);background:var(--surface-2)}
 .delete-dialog-actions button{appearance:none;min-height:40px;padding:10px 18px;border:1px solid transparent;border-radius:9px;font:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:background .15s,box-shadow .15s}
 .delete-dialog-cancel{background:var(--surface);border-color:var(--border)!important;color:var(--text)}
+.delete-file-name{white-space:pre-line}
 .delete-dialog-cancel:hover{background:var(--surface-3)}
 .delete-dialog-submit{background:#d92d20;color:#fff;box-shadow:0 1px 2px #10182812}
 .delete-dialog-submit:hover{background:#b42318}

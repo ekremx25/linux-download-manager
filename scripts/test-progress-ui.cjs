@@ -47,7 +47,7 @@ assert.equal(vm.runInContext("isExtensionMutation({type:'childList',target:pageN
 assert.equal(vm.runInContext("isExtensionMutation({type:'childList',target:pageNode,addedNodes:[pageNode]})",context),false);
 console.log('PASS: extension overlay updates do not retrigger media scans');
 
-// Bulk actions affect only eligible selections; a completed file is never resumed.
+// Bulk actions affect only eligible selections; file deletion requires one confirmation.
 (async()=>{
   const elements=new Map();
   c.document.getElementById=id=>{if(!elements.has(id))elements.set(id,{setAttribute(){},dataset:{}});return elements.get(id);};
@@ -61,6 +61,10 @@ console.log('PASS: extension overlay updates do not retrigger media scans');
   calls.length=0;
   await vm.runInContext("batch('pause_download')",c);
   assert.deepEqual(calls,[['pause_download',1]]);
+  calls.length=0;
+  vm.runInContext('state.selected=new Set([1,2,3,4]);',c);
+  await vm.runInContext("batch('cancel_download',true)",c);
+  assert.deepEqual(calls,[['cancel_download',1],['cancel_download',2],['cancel_download',4]],'cancel skips completed downloads');
   vm.runInContext("state.filter='failed';",c);
   assert.equal(vm.runInContext('filtered().length',c),1);
   console.log('PASS: selected-only resume, active-only pause, failure filter');
@@ -70,11 +74,16 @@ console.log('PASS: extension overlay updates do not retrigger media scans');
   assert.equal(calls.length,0,'cancel must preserve the file and history');
   vm.runInContext("confirmFileDeletion=async()=>true;",c);
   await vm.runInContext("deleteDownloadFiles(1)",c);
-  assert.equal(calls.length,0,'active downloads must not be deleted');
+  assert.deepEqual(calls,[['delete_download_files',1]],'the backend stops active downloads before deletion');
+  calls.length=0;
   await vm.runInContext("deleteDownloadFiles(3)",c);
   assert.deepEqual(calls,[['delete_download_files',3]]);
   calls.length=0;
+  vm.runInContext('state.selected=new Set([2,4]);',c);
+  await vm.runInContext('deleteSelectedFiles()',c);
+  assert.deepEqual(calls,[['delete_download_files',2],['delete_download_files',4]],'bulk delete touches only selected rows');
+  calls.length=0;
   await vm.runInContext("clearDownload(3)",c);
   assert.deepEqual(calls,[['clear_download',3]],'keep-file action must remain separate');
-  console.log('PASS: file deletion needs confirmation, excludes active downloads, keep-file action preserved');
+  console.log('PASS: selected cancellation, confirmed single/bulk file deletion, keep-file action preserved');
 })().catch(error=>{console.error(error);process.exitCode=1;});
