@@ -879,6 +879,13 @@ impl DownloadService {
                 .map(|value| format!("{name}: {value}\r\n"))
         })
         .collect::<String>();
+        let expected_duration = hls::expected_duration(
+            &self.client,
+            &playlist_urls[0],
+            http_headers,
+            source_page_url,
+        )
+        .await;
         let mut last_error = None;
 
         // Some HLS providers publish the playlist a moment after playback starts.
@@ -1042,6 +1049,16 @@ impl DownloadService {
 
                 match attempt_error {
                     None => {
+                        if let Some(expected) = expected_duration {
+                            let actual = probe_media_duration(&temp_path)?;
+                            if actual + (expected * 0.01).max(10.0) < expected {
+                                return Err(format!(
+                                    "Incomplete video: source is {:.0} minutes, downloaded file is {:.0} minutes. Some stream fragments were unreachable; the file was not marked complete.",
+                                    expected / 60.0,
+                                    actual / 60.0
+                                ));
+                            }
+                        }
                         last_error = None;
                         if let Some(prepared) = &prepared {
                             prepared.cleanup().await;
@@ -2445,6 +2462,25 @@ mod aac_repair_tests {
             ]
         );
     }
+}
+
+fn probe_media_duration(path: &Path) -> Result<f64, String> {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("could not verify video duration: {error}"))?;
+    if !output.status.success() {
+        return Err("could not verify downloaded video duration".to_string());
+    }
+    let duration = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "downloaded video has no readable duration".to_string())?;
+    if !duration.is_finite() || duration <= 0.0 {
+        return Err("downloaded video has no readable duration".to_string());
+    }
+    Ok(duration)
 }
 
 fn ensure_ffmpeg_available() -> Result<(), String> {

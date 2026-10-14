@@ -245,6 +245,33 @@ async fn fetch_playlist(
     Some((base, String::from_utf8(body).ok()?))
 }
 
+pub(super) async fn expected_duration(
+    client: &Client,
+    url: &Url,
+    headers: &HashMap<String, String>,
+    referer: Option<&str>,
+) -> Option<f64> {
+    let mut next = url.clone();
+    let mut visited = std::collections::HashSet::new();
+    for _ in 0..4 {
+        if !visited.insert(next.clone()) {
+            return None;
+        }
+        let (base, text) = fetch_playlist(client, &next, url, headers, referer).await?;
+        if text.lines().any(|line| line.trim() == "#EXT-X-ENDLIST") {
+            let durations: Vec<f64> = text
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("#EXTINF:"))
+                .map(|value| value.split(',').next()?.parse::<f64>().ok())
+                .collect::<Option<_>>()?;
+            let total: f64 = durations.iter().sum();
+            return (durations.len() > 0 && total.is_finite() && total > 0.0).then_some(total);
+        }
+        next = master_variant(&text, &base)?;
+    }
+    None
+}
+
 fn request(
     client: &Client,
     url: &Url,
@@ -727,6 +754,10 @@ mod integration_tests {
     async fn configured_ten_connections_are_used() {
         let fixture = Fixture::start_count(vec![7; 4096], 20);
         let target = test_target("ten-connections");
+        assert_eq!(
+            expected_duration(&Client::new(), &fixture.url, &HashMap::new(), None).await,
+            Some(20.0)
+        );
         let prepared = prepare_parallel(
             &Client::new(),
             &fixture.url,
