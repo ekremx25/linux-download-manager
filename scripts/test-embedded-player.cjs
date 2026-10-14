@@ -148,3 +148,70 @@ vm.runInContext(`
 }
 `,worker);
 console.log('PASS: Rapidrame master selected over audio-only rendition');
+
+assert.ok(manifest.content_scripts.some(s=>s.world==='MAIN'&&s.matches.includes('https://*.rapidvid.org/*')));
+vm.runInContext(`rememberMediaRequest(9,'https://cdn.example/opaque','observed-manifest','https://rapidvid.org/vx/example')`,worker);
+const rapid=vm.runInContext("chooseBestMediaCapturePayload(9,null,'https://example.com/film','Film','https://rapidvid.org/vx/example')",worker);
+assert.equal(rapid.capture.url,'https://cdn.example/opaque');
+assert.equal(rapid.capture.streamManifest,true);
+assert.equal(rapid.capture.sourcePageUrl,'https://rapidvid.org/vx/example');
+console.log('PASS: Rapidvid observer enabled and player manifest routed to capture');
+
+const rapidFrame=get(frame('https://rapidvid.org/vx/v1xd0df7f84'));
+assert.equal(rapidFrame.kind,'media-fallback');
+assert.equal(rapidFrame.url,null);
+assert.equal(rapidFrame.playerPageUrl,'https://rapidvid.org/vx/v1xd0df7f84');
+assert.equal(get(frame('https://rapidvid.org/vx/id',0,0)),null);
+assert.equal(get(frame('https://rapidvid.org.evil.example/vx/id')),null);
+assert.equal(get(frame('https://example.com/vx/id')),null);
+assert.equal(get(frame('https://rapidvid.org/account')),null);
+console.log('PASS: visible Rapidvid /vx/ frames get a download target; unrelated frames do not');
+
+// Lazy embeds are present before the user starts playback.
+const lazyFrame=frame(null,1010,586,100);
+lazyFrame.getAttribute=name=>name==='data-src'?'https://rapidvid.org/vx/example':'about:blank';
+assert.equal(get(lazyFrame).playerPageUrl,'https://rapidvid.org/vx/example');
+// Keep a visible control when the player is partially above the viewport.
+c.document={fullscreenElement:null};
+c.positionButton={id:'',dataset:{},style:{setProperty(){}},hidden:true};
+for(const [top,hidden] of [[100,false],[0,false],[-100,false],[-600,true],[900,true]]){
+ c.positionFrame=frame('https://rapidvid.org/vx/example',1010,586,top);
+ vm.runInContext('placeAbovePlayer(positionButton,positionFrame)',c);
+ assert.equal(c.positionButton.hidden,hidden,`player top=${top}`);
+}
+console.log('PASS: lazy player recognized; scrolled player retains control; offscreen players hidden');
+
+// Recognized embeds must render independently of generic media-container scans.
+c.window.location={href:'https://www.fullhdfilmizlesene.now/film/example/',hostname:'www.fullhdfilmizlesene.now'};
+c.location=c.window.location;
+const attached=[];
+const listeners=new Map();
+let currentEmbedUrl='https://rapidvid.org/vx/first';
+const visibleEmbed=frame(currentEmbedUrl,1010,586,170);
+visibleEmbed.isConnected=true;
+visibleEmbed.getAttribute=()=>currentEmbedUrl;
+c.document={fullscreenElement:null,
+ querySelectorAll(selector){
+  if(selector==='iframe[src], iframe[data-src]')return [visibleEmbed];
+  throw new Error('Generic scan must not run for an identified player');
+ },
+ documentElement:{appendChild(button){button.isConnected=true;if(!attached.includes(button))attached.push(button);}},
+ createElement(){return {id:'',dataset:{},hidden:false,isConnected:false,
+  classList:{add(){}},style:{setProperty(){}},removeAttribute(){},setAttribute(){},
+  addEventListener(type,fn){listeners.set(type,fn);},remove(){this.isConnected=false;}
+ };}
+};
+vm.runInContext('mediaOverlayRoot={replaceChildren(){}}; refreshMediaOverlay()',c);
+assert.equal(attached.length,1);
+assert.equal(attached[0].hidden,false);
+assert.equal(attached[0].textContent,'↓ Download video  ·  LDM');
+vm.runInContext('refreshMediaOverlay()',c);
+assert.equal(attached.length,1,'refresh must not duplicate the button');
+currentEmbedUrl='https://rapidvid.org/vx/second';
+vm.runInContext('triggerCaptureOnce=(candidate)=>{globalThis.clickedPlayer=candidate.playerPageUrl;}',c);
+listeners.get('click')({preventDefault(){},stopPropagation(){}});
+assert.equal(c.clickedPlayer,currentEmbedUrl,'click must use the current player, not stale iframe URL');
+attached[0].isConnected=false;
+vm.runInContext('refreshMediaOverlay()',c);
+assert.equal(attached[0].isConnected,true,'a removed button must be reattached');
+console.log('PASS: embed button renders without generic scanning, persists without duplicates, and captures current player');

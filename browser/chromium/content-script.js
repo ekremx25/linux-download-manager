@@ -138,13 +138,38 @@ function handleFileLinkClick(event){
   });
 }
 
+function overlayDiagnostic() {
+  const inspect = element => {
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return {tag: element.tagName, connected: element.isConnected,
+      hidden: !!element.hidden, display: style.display, visibility: style.visibility,
+      opacity: style.opacity, zIndex: style.zIndex,
+      rect: {top: rect.top, left: rect.left, width: rect.width, height: rect.height}};
+  };
+  return {
+    viewport: {width: innerWidth, height: innerHeight},
+    documentHidden: document.hidden, fullscreen: !!document.fullscreenElement,
+    disconnected: extensionDisconnected,
+    layer: mediaOverlayRoot ? inspect(mediaOverlayRoot) : null,
+    controls: Array.from(document.querySelectorAll('.ldm-media-button, .ldm-hover-button, .ldm-site-btn')).slice(0, 8).map(inspect),
+    frames: Array.from(document.querySelectorAll('iframe')).slice(0, 12).map(frame => ({
+      ...inspect(frame), recognized: !!candidateFromPlayerFrame(frame)
+    }))
+  };
+}
+
 function bootstrap() {
+  chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+    if (message?.type !== "capture-overlay-diagnostic") return;
+    try { respond(overlayDiagnostic()); } catch (error) { respond({error: String(error)}); }
+  });
   document.addEventListener("click",handleFileLinkClick,true);
   chrome.runtime.onMessage.addListener((message,_sender,respond)=>{
     if(message?.type!=='selected-audio-language')return;
     selectedAudioLanguage().then(language=>respond({language}));return true;
   });
-  if (/(^|\.)(molystream\.org|hotstream\.club)$/i.test(window.location.hostname)) {
+  if (/(^|\.)(molystream\.org|hotstream\.club|rapidvid\.org)$/i.test(window.location.hostname)) {
     window.addEventListener("message", (event) => {
       if (event.source !== window || event.data?.type !== "ldm-player-manifest") return;
       const url = normalizeUrl(event.data.url);
@@ -264,12 +289,12 @@ function placeAbovePlayer(button, element) {
     }
   }
   const visible = rect && rect.width >= 80 && rect.height >= 60 &&
-    rect.top >= 48 && rect.top < window.innerHeight &&
+    rect.bottom > 48 && rect.top < window.innerHeight &&
     rect.right > 0 && rect.left < window.innerWidth && !document.fullscreenElement;
   button.hidden = !visible;
   if (!visible) return;
   button.style.setProperty("position", "fixed", "important");
-  button.style.setProperty("top", `${rect.top - 8}px`, "important");
+  button.style.setProperty("top", `${Math.max(44, rect.top - 8)}px`, "important");
   button.style.setProperty("left", `${Math.max(8, Math.min(rect.right - 174, window.innerWidth - 182))}px`, "important");
   button.style.setProperty("right", "auto", "important");
   button.style.setProperty("transform", "translateY(-100%)", "important");
@@ -661,7 +686,7 @@ function observePageChanges() {
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ["href", "src", "download", "theater"]
+    attributeFilter: ["href", "src", "data-src", "download", "theater"]
   });
 }
 
@@ -837,6 +862,11 @@ function refreshMediaOverlay() {
 
   const host = window.location.hostname;
   if (/reddit\.com|youtube\.com|x\.com|twitter\.com|facebook\.com|instagram\.com/.test(host)) {
+    return;
+  }
+
+  if (injectEmbeddedPlayerButtons()) {
+    if (hoverButton) hoverButton.hidden = true;
     return;
   }
 
@@ -1217,21 +1247,57 @@ function isSameCandidate(left, right) {
 // the visible player frame and ask the worker for the observed stream on click.
 function candidateFromPlayerFrame(frame) {
   if (!(frame instanceof Element) || frame.tagName !== "IFRAME") return null;
-  const url = normalizeUrl(frame.getAttribute("src"));
+  const url = normalizeUrl(frame.getAttribute("src"))
+    || normalizeUrl(frame.getAttribute("data-src"));
   if (!url) return null;
-  const path = new URL(url).pathname;
-  if (!/(?:^|\/)(?:embed|player)(?:[/.]|$)/i.test(path)) return null;
+  const parsed = new URL(url);
+  const path = parsed.pathname;
+  const rapidvidPlayer = /(^|\.)rapidvid\.org$/i.test(parsed.hostname)
+    && /^\/vx\/[^/]+\/?$/.test(path);
+  if (!rapidvidPlayer && !/(?:^|\/)(?:embed|player)(?:[/.]|$)/i.test(path)) return null;
   const rect = frame.getBoundingClientRect();
   if (rect.width < 180 || rect.height < 120 || !isVisibleMediaRect(rect)) return null;
   // An embed page is HTML, not the downloadable media URL.
   return { element: frame, url: null, kind: "media-fallback", playerPageUrl: url };
 }
 
+function injectEmbeddedPlayerButtons() {
+  let visible = false;
+  for (const frame of document.querySelectorAll("iframe[src], iframe[data-src]")) {
+    const candidate = candidateFromPlayerFrame(frame);
+    const existing = siteDownloadButtons.get(frame);
+    if (!candidate) {
+      if (existing) { existing.remove(); siteDownloadButtons.delete(frame); }
+      continue;
+    }
+    if (existing) {
+      if (!existing.isConnected) document.documentElement.appendChild(existing);
+      placeAbovePlayer(existing, frame);
+      visible ||= !existing.hidden;
+      continue;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ldm-site-btn";
+    button.addEventListener("pointerdown", event => {
+      event.preventDefault(); event.stopPropagation();
+    });
+    button.addEventListener("click", event => {
+      event.preventDefault(); event.stopPropagation();
+      const current = candidateFromPlayerFrame(frame);
+      if (current) { activeCandidate = current; triggerCaptureOnce(current, button); }
+    });
+    attachPlayerButton(button, frame);
+    visible ||= !button.hidden;
+  }
+  return visible;
+}
+
 function collectOverlayTargets() {
   const results = [];
   const seen = new Set();
 
-  for (const frame of document.querySelectorAll("iframe[src]")) {
+  for (const frame of document.querySelectorAll("iframe[src], iframe[data-src]")) {
     const candidate = candidateFromPlayerFrame(frame);
     if (!candidate) continue;
     seen.add(frame);

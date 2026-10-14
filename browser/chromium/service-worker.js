@@ -90,10 +90,13 @@ function diagnosticState(tabId) {
   if (!captureDiagnostics.has(tabId)) captureDiagnostics.set(tabId, { frames: {}, requests: [] });
   return captureDiagnostics.get(tabId);
 }
-function saveCaptureDiagnostic(tabId, page) {
+async function saveCaptureDiagnostic(tabId, page) {
+  let overlay;
+  try { overlay = await chrome.tabs.sendMessage(tabId, {type: "capture-overlay-diagnostic"}, {frameId: 0}); }
+  catch (error) { overlay = {error: String(error)}; }
   const state = diagnosticState(tabId);
   const report = {version: chrome.runtime.getManifest().version,
-    page: diagnosticUrl(page), ...state,
+    page: diagnosticUrl(page), overlay, ...state,
     candidates: getMediaCandidatesForTab(tabId).map(c => ({...diagnosticUrl(c.url), kind: c.streamKind, type: c.type}))};
   chrome.downloads.download({
     url: "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(report, null, 2)),
