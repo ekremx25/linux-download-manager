@@ -101,6 +101,27 @@ pub async fn queue_download_request(
     let category = library::classify(&file_name);
     let category_dir = library::ensure_category_dir(&target_dir, category)?;
     let existing = state.storage.list_downloads()?;
+    if request.stream_manifest
+        && let Some(asset_id) = molystream_asset_id(&request.url)
+    {
+        for record in &existing {
+            if !matches!(record.status.as_str(), "queued" | "in_progress" | "paused") {
+                continue;
+            }
+            let Some(previous) = state.storage.load_resume_job(record.id)? else {
+                continue;
+            };
+            if previous.stream_manifest
+                && previous.source_page_url == request.source_page_url
+                && molystream_asset_id(&previous.url).as_deref() == Some(asset_id.as_str())
+                && previous.transfer.container == transfer.container
+                && previous.transfer.max_height == transfer.max_height
+                && previous.transfer.audio_language == transfer.audio_language
+            {
+                return Ok(record.clone());
+            }
+        }
+    }
     let mut target_path = state
         .download_service
         .reserve_target_path(&category_dir, &file_name);
@@ -183,6 +204,22 @@ pub async fn queue_download_request(
     state.enqueue_download(app_handle, job)?;
 
     state.storage.get_download(created.id)
+}
+
+fn molystream_asset_id(raw_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(raw_url).ok()?;
+    let host = url.host_str()?;
+    if host != "molystream.org" && !host.ends_with(".molystream.org") {
+        return None;
+    }
+    url.path_segments()?.find(|segment| {
+        segment.split_once('-').is_some_and(|(number, hash)| {
+            !number.is_empty()
+                && number.bytes().all(|byte| byte.is_ascii_digit())
+                && hash.len() >= 16
+                && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    }).map(str::to_string)
 }
 
 /// Returns the trailing extension when it looks like a real file extension:
@@ -303,6 +340,23 @@ pub fn normalize_bandwidth_limit(value: Option<u64>) -> Result<Option<u64>, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn molystream_master_and_rendition_identify_one_video() {
+        let id = "17522-6ace05cde218992aaaf364c1";
+        assert_eq!(
+            molystream_asset_id(&format!("https://dbx.molystream.org/embed/sheila/{id}")),
+            molystream_asset_id(&format!("https://dbx.molystream.org/embed/{id}/q/1"))
+        );
+        assert_ne!(
+            molystream_asset_id(&format!("https://dbx.molystream.org/embed/{id}/q/1")),
+            molystream_asset_id("https://dbx.molystream.org/embed/17523-6ace05cde218992aaaf364c1/q/1")
+        );
+        assert_eq!(
+            molystream_asset_id(&format!("https://dbx.molystream.org.evil.example/embed/{id}")),
+            None
+        );
+    }
+
     #[test]
     fn instagram_topic_name_is_short_and_readable() {
         assert_eq!(short_caption_title("Evde kolay makarna tarifi! #yemek @chef https://example.com"), Some("Evde kolay makarna tarifi".into()));
