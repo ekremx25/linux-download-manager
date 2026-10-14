@@ -13,6 +13,12 @@ enum SegmentFailure {
     Local(String),
 }
 
+enum PrefetchOutcome {
+    Ready(PathBuf),
+    Unavailable,
+    RateLimited,
+}
+
 /// How long to wait before retrying a failed segment, or None when the failure
 /// must abort. A 429 is retried with a real pause so parallel prefetch adapts
 /// to a rate-limited CDN instead of collapsing into the sequential fallback.
@@ -216,25 +222,47 @@ async fn fetch_playlist(
     credential_origin: &Url,
     headers: &HashMap<String, String>,
     referer: Option<&str>,
-) -> Option<(Url, String)> {
-    let response = request(client, url, credential_origin, headers, referer)
-        .send()
-        .await
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let base = response.url().clone();
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.ok()?;
-        if body.len() + chunk.len() > PLAYLIST_LIMIT {
-            return None;
+) -> Result<Option<(Url, String)>, String> {
+    for attempt in 0..3u32 {
+        let response = match request(client, url, credential_origin, headers, referer)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => return Ok(None),
+        };
+        if response.status().as_u16() == 429 {
+            if attempt == 2 {
+                return Err("HLS server returned 429 Too Many Requests after waiting; pause this download and try again later or choose another video source".into());
+            }
+            let server_delay = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok());
+            let seconds = server_delay.unwrap_or(5 * (1 << attempt)).clamp(1, 60);
+            tokio::time::sleep(Duration::from_secs(seconds)).await;
+            continue;
         }
-        body.extend_from_slice(&chunk);
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        let base = response.url().clone();
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(_) => return Ok(None),
+            };
+            if body.len() + chunk.len() > PLAYLIST_LIMIT {
+                return Ok(None);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        return Ok(String::from_utf8(body).ok().map(|text| (base, text)));
     }
-    Some((base, String::from_utf8(body).ok()?))
+    unreachable!()
 }
 
 fn request(
@@ -293,7 +321,7 @@ pub(super) async fn prepare_parallel(
         if !visited.insert(next.clone()) {
             return Ok(None);
         }
-        let Some((base, text)) = fetch_playlist(client, &next, url, headers, referer).await else {
+        let Some((base, text)) = fetch_playlist(client, &next, url, headers, referer).await? else {
             return Ok(None);
         };
         if let Some((local, urls)) = parse(&text, &base) {
@@ -313,17 +341,26 @@ pub(super) async fn prepare_parallel(
     let mut prefetched = prefetch_playlist(
         client, url, headers, referer, &base, &text, &cache, parallel, progress,
     ).await?;
-    // A burst of requests can make a CDN reject one segment even though the
-    // already fetched segments are valid. Reuse them and retry with a smaller
-    // connection ceiling before giving up to FFmpeg's sequential network path.
-    if prefetched.is_none() && parallel > 4 {
+    // Reuse finished segments at a lower concurrency after a network failure.
+    // A 429 needs a longer pause and just one request at a time; sending the
+    // playlist straight to FFmpeg would immediately repeat the rejected request.
+    if matches!(prefetched, PrefetchOutcome::RateLimited) {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        prefetched = prefetch_playlist(
+            client, url, headers, referer, &base, &text, &cache, 1, progress,
+        ).await?;
+    } else if matches!(prefetched, PrefetchOutcome::Unavailable) && parallel > 4 {
         tokio::time::sleep(Duration::from_secs(2)).await;
         prefetched = prefetch_playlist(
             client, url, headers, referer, &base, &text, &cache, 4, progress,
         ).await?;
     }
-    let Some((playlist, _, _)) = prefetched else {
-        return Ok(None);
+    let playlist = match prefetched {
+        PrefetchOutcome::Ready(path) => path,
+        PrefetchOutcome::Unavailable => return Ok(None),
+        PrefetchOutcome::RateLimited => {
+            return Err("HLS server returned 429 Too Many Requests for media segments after waiting; pause this download and try again later or choose another video source".into());
+        }
     };
     // NOTE: audio streams are left to FFmpeg.  When a CDN limits the audio
     // playlist (e.g. Rapidrame returns 429 only on audio segments), skipping
@@ -352,9 +389,9 @@ async fn prefetch_playlist(
     cache: &Path,
     parallel: usize,
     progress: &mut impl FnMut(DownloadProgress) -> Result<(), String>,
-) -> Result<Option<(PathBuf, u64, usize)>, String> {
+) -> Result<PrefetchOutcome, String> {
     let Some((local, urls)) = parse(text, base) else {
-        return Ok(None);
+        return Ok(PrefetchOutcome::Unavailable);
     };
     // Completed segments are reusable only for the exact same playlist and URL.
     let fingerprint = format!("{:x}", Sha256::digest(format!("{base}\n{text}")));
@@ -367,8 +404,9 @@ async fn prefetch_playlist(
     let mut completed = 0usize;
     // Rate limiting is global, so the in-flight cap lives here and every segment
     // job shares it instead of relying on the fixed buffer_unordered width.
-    let slots = Arc::new(tokio::sync::Semaphore::new(parallel));
-    let live = Arc::new(AtomicUsize::new(parallel));
+    let initial_parallel = parallel.min(RATE_LIMIT_SOFT_CAP);
+    let slots = Arc::new(tokio::sync::Semaphore::new(initial_parallel));
+    let live = Arc::new(AtomicUsize::new(initial_parallel));
     let streak = Arc::new(AtomicUsize::new(0));
     let jobs = futures_util::stream::iter(urls.into_iter().enumerate().map(|(index, url)| {
         let folder = folder.clone();
@@ -456,7 +494,8 @@ async fn prefetch_playlist(
                                     "HLS segment {}: {error}",
                                     index + 1
                                 )),
-                                _ => SegmentFailure::Network,
+                                SegmentFailure::RateLimited => SegmentFailure::RateLimited,
+                                SegmentFailure::Network => SegmentFailure::Network,
                             });
                         };
                         tokio::time::sleep(delay).await;
@@ -473,7 +512,8 @@ async fn prefetch_playlist(
             Ok(()) => {}
             // Drop unfinished requests but keep completed cache files. The caller
             // can now try FFmpeg and its alternative playlists instead of failing.
-            Err(SegmentFailure::Network | SegmentFailure::RateLimited) => return Ok(None),
+            Err(SegmentFailure::Network) => return Ok(PrefetchOutcome::Unavailable),
+            Err(SegmentFailure::RateLimited) => return Ok(PrefetchOutcome::RateLimited),
             Err(SegmentFailure::Local(error)) => return Err(error),
         }
         completed += 1;
@@ -490,7 +530,7 @@ async fn prefetch_playlist(
     fs::write(&playlist, local)
         .await
         .map_err(|e| format!("HLS playlist: {e}"))?;
-    Ok(Some((playlist, bytes.load(Ordering::Relaxed), count)))
+    Ok(PrefetchOutcome::Ready(playlist))
 }
 
 #[cfg(test)]
@@ -736,7 +776,7 @@ mod integration_tests {
     }
     #[tokio::test]
     async fn configured_ten_connections_are_used() {
-        let fixture = Fixture::start_count(vec![7; 4096], 20);
+        let fixture = Fixture::start_count(vec![7; 4096], 80);
         let target = test_target("ten-connections");
         let prepared = prepare_parallel(
             &Client::new(),
@@ -751,9 +791,31 @@ mod integration_tests {
         .unwrap()
         .unwrap();
         assert_eq!(fixture.peak.load(Ordering::Relaxed), 10);
-        assert_eq!(fixture.requests.load(Ordering::Relaxed), 20);
+        assert_eq!(fixture.requests.load(Ordering::Relaxed), 80);
         prepared.cleanup().await;
         let _ = fs::remove_dir_all(target.parent().unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn playlist_429_waits_before_retry_instead_of_falling_back_to_ffmpeg() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("http://{}/playlist.m3u8", listener.local_addr().unwrap())).unwrap();
+        let server = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut input = [0; 1024];
+                let _ = socket.read(&mut input);
+                let body = if attempt == 0 { "" } else { "#EXTM3U\n#EXT-X-ENDLIST\n" };
+                let status = if attempt == 0 { "429 Too Many Requests" } else { "200 OK" };
+                write!(socket, "HTTP/1.1 {status}\r\nRetry-After: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let start = std::time::Instant::now();
+        let (_, playlist) = fetch_playlist(&Client::new(), &url, &url, &HashMap::new(), None)
+            .await.unwrap().expect("the playlist should load after the server's wait");
+        assert!(start.elapsed() >= Duration::from_secs(1));
+        assert!(playlist.starts_with("#EXTM3U"));
+        server.join().unwrap();
     }
 
     #[tokio::test]
