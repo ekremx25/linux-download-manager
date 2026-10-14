@@ -38,6 +38,9 @@ vm.createContext(c);vm.runInContext(ui,c);
 assert.equal(vm.runInContext("speedFor({id:1,status:'queued'},{status:'in_progress',speedBytesPerSecond:2048})",c),'2048/s');
 assert.equal(vm.runInContext("etaFor({id:1,status:'queued'},{status:'in_progress',etaSeconds:12})",c),'12s');
 assert.equal(vm.runInContext("etaFor({id:2,status:'in_progress'},{totalBytes:null,speedBytesPerSecond:2048})",c),'—');
+c.formatBytes=n=>`${n} B`;
+assert.equal(vm.runInContext("displayedSize({status:'in_progress',totalBytes:null,downloadedBytes:72000000})",c),'—','unknown stream size must not look complete');
+assert.equal(vm.runInContext("displayedSize({status:'completed',totalBytes:null,downloadedBytes:72000000})",c),'72000000 B','finished stream size is known from output');
 console.log('PASS: coalesced scans, live speed/ETA before DB refresh, unknown duration');
 
 context.ownNode={nodeType:1,closest:()=>({})};

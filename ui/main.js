@@ -130,13 +130,14 @@ function render(){
   $('selection-summary').textContent=`${list.length} / ${state.downloads.length} files`;
   updateSelection();updateQueueSummary();
 }
-function progressText(d){return d.status==='in_progress'&&!d.totalBytes?'Calculating size':`${progressOf(d).toFixed(0)}% · ${statusLabel(d.status)}`;}
+function progressText(d){return d.status==='in_progress'&&!d.totalBytes?'Size unknown · Downloading':`${progressOf(d).toFixed(0)}% · ${statusLabel(d.status)}`;}
+function displayedSize(d){return d.totalBytes?formatBytes(d.totalBytes):d.status==='completed'?formatBytes(d.downloadedBytes):'—';}
 function rowHtml(d){
   const live=state.live.get(d.id)||{},cat=categoryFor(d),error=d.errorMessage;
   return `<div class="download-row item ${state.selected.has(d.id)?'selected':''}" role="row" data-id="${d.id}" tabindex="0">
   <input type="checkbox" ${state.selected.has(d.id)?'checked':''} aria-label="Select ${escapeHtml(d.fileName)}">
   <div class="file-cell"><span class="file-icon">${categoryIcon(cat)}</span><div><div class="file-name" title="${escapeHtml(d.fileName)}">${escapeHtml(d.fileName)}</div><div class="file-kind ${error?'error-text':''}" title="${escapeHtml(error||'')}">${escapeHtml(error||labels[cat]||'File')}</div></div></div>
-  <span data-cell="size" data-label="Size">${formatBytes(d.totalBytes||d.downloadedBytes)}</span>
+  <span data-cell="size" data-label="Size">${displayedSize(d)}</span>
   <div class="status-cell"><span class="status-line" data-cell="status">${progressText(d)}</span><div class="progress ${d.status}" data-cell="progress-track"><i data-cell="progress" style="width:${progressOf(d)}%"></i></div></div>
   <span data-cell="speed" data-label="Speed">${speedFor(d,live)}</span><span data-cell="eta" data-label="Time left" title="Estimate for the current transfer; video/audio merging time is not included.">${etaFor(d,live)}</span>
   <div class="row-actions">${canPause(d)?'<button class="icon-button" data-action="pause_download" title="Pause" aria-label="Pause">Ⅱ</button>':''}${canResume(d)?'<button class="icon-button" data-action="resume_download" title="Resume / retry" aria-label="Resume / retry">▶</button>':''}<button class="icon-button" data-action="folder" title="Show in folder" aria-label="Show in folder">▱</button><button class="icon-button" data-action="detail" title="Details" aria-label="Details">ⓘ</button></div></div>`;
@@ -167,7 +168,7 @@ function etaFor(d,live){
 function updateRow(id){
   const row=document.querySelector(`.download-row.item[data-id="${id}"]`),record=state.downloads.find(d=>d.id===id);
   if(!row||!record)return false;const d=merged(record),live=state.live.get(id)||{};
-  for(const [cell,value] of Object.entries({status:progressText(d),size:formatBytes(d.totalBytes||d.downloadedBytes),speed:speedFor(d,live),eta:etaFor(d,live)})){const el=row.querySelector(`[data-cell="${cell}"]`);if(el&&el.textContent!==value)el.textContent=value;}
+  for(const [cell,value] of Object.entries({status:progressText(d),size:displayedSize(d),speed:speedFor(d,live),eta:etaFor(d,live)})){const el=row.querySelector(`[data-cell="${cell}"]`);if(el&&el.textContent!==value)el.textContent=value;}
   row.querySelector('[data-cell="progress-track"]').className=`progress ${d.status}`;row.querySelector('[data-cell="progress"]').style.width=`${progressOf(d)}%`;updateQueueSummary();return true;
 }
 function updateQueueSummary(){

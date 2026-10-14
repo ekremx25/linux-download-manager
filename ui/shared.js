@@ -43,7 +43,7 @@ export function formatTime(seconds) {
 
 export function progressOf(download) {
   const total = Number(download?.totalBytes || 0);
-  return total > 0 ? Math.max(0, Math.min(100, Number(download?.downloadedBytes || 0) / total * 100)) : 0;
+  return total > 0 ? Math.max(0, Math.min(100, Number(download?.downloadedBytes || 0) / total * 100)) : download?.status === 'completed' ? 100 : 0;
 }
 
 // The backend classifies the real file name and stores it on the record, so
