@@ -135,7 +135,7 @@ The extension supports Chromium-based browsers, including Chrome, Chromium, Brav
 
 Keep this folder in place: the browser loads the extension from it. After updates, reload the extension and refresh existing tabs.
 
-For screenshots and detailed Turkish instructions, see the [visual extension installation guide](docs/extension-install-tr.md). Chrome uses the unpacked folder above; the installer creates only one ZIP, `~/Documents/Linux Download Manager Firefox Extension.zip`, for Firefox. The desktop application and native messaging host must also be installed for either extension to download files.
+For visual step-by-step instructions, see the [English installation guide](docs/extension-install-en.md) or the [Turkish guide](docs/extension-install-tr.md). Chrome uses the unpacked folder above; the installer creates only one ZIP, `~/Documents/Linux Download Manager Firefox Extension.zip`, for Firefox. The desktop application and native messaging host must also be installed for either extension to download files.
 
 ### Firefox
 
