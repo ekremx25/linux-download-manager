@@ -155,3 +155,25 @@
 
 .ldm-quality-container{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:8px!important;padding:8px 10px!important;font:13px system-ui,sans-serif!important;color:CanvasText!important}
 .ldm-quality-container select{font:inherit!important;color:CanvasText!important;background:Canvas!important;border:1px solid ButtonBorder!important;border-radius:6px!important;padding:6px!important;max-width:160px!important}
+
+/* A compact download list: format first, then clearly separated video/audio choices. */
+.ldm-quality-picker{
+  width:286px!important;padding:10px!important;border-radius:12px!important;
+  background:Canvas!important;box-shadow:0 12px 36px #0005!important;
+}
+.ldm-quality-title{padding:8px 42px 10px 8px!important;font:700 16px/22px system-ui,sans-serif!important}
+.ldm-quality-close{right:12px!important;top:11px!important;width:28px!important;height:28px!important;border-radius:6px!important}
+.ldm-quality-close:hover{background:ButtonFace!important}
+.ldm-quality-container{margin:0 0 8px!important;padding:8px!important;background:ButtonFace!important;border-radius:8px!important}
+.ldm-quality-container select{min-width:126px!important;background:Canvas!important}
+.ldm-quality-section{
+  margin:10px 4px 5px!important;padding:7px 5px 5px!important;
+  border-top:1px solid color-mix(in srgb,CanvasText 15%,Canvas)!important;
+  color:color-mix(in srgb,CanvasText 65%,Canvas)!important;
+  font:700 10px/14px system-ui,sans-serif!important;letter-spacing:.08em!important;
+}
+.ldm-quality-option{position:relative!important;padding:9px 10px 9px 34px!important;font-weight:600!important}
+.ldm-quality-option::before{position:absolute!important;left:10px!important;top:9px!important;font-size:13px!important;color:color-mix(in srgb,CanvasText 65%,Canvas)!important}
+.ldm-quality-video::before{content:'▶'!important}
+.ldm-quality-audio::before{content:'♫'!important}
+.ldm-quality-option:hover,.ldm-quality-option:focus-visible{background:color-mix(in srgb,Highlight 13%,Canvas)!important}

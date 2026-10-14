@@ -1,4 +1,18 @@
 fn main() {
+    let args: Vec<_> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|arg| arg == "--package-firefox-extension") {
+        if args.len() != 4 {
+            eprintln!("Usage: linux-download-manager --package-firefox-extension FIREFOX_DIR OUTPUT_ZIP");
+            std::process::exit(2);
+        }
+        if let Err(error) = linux_download_manager::package_firefox_extension(
+            args[2].as_os_str(), args[3].as_os_str()
+        ) {
+            eprintln!("Could not package browser extensions: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     // WebKit2GTK 4.1 + recent Mesa (Arch rolling, Fedora 40+, Ubuntu 24.04+)
     // has two separate bugs:
     //   1. The dmabuf renderer path crashes with SIGSEGV at startup.

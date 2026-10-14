@@ -135,6 +135,12 @@ The extension supports Chromium-based browsers, including Chrome, Chromium, Brav
 
 Keep this folder in place: the browser loads the extension from it. After updates, reload the extension and refresh existing tabs.
 
+For screenshots and detailed Turkish instructions, see the [visual extension installation guide](docs/extension-install-tr.md). Chrome uses the unpacked folder above; the installer creates only one ZIP, `~/Documents/Linux Download Manager Firefox Extension.zip`, for Firefox. The desktop application and native messaging host must also be installed for either extension to download files.
+
+### Firefox
+
+The installer also copies a Firefox build to `~/Documents/Linux Download Manager Firefox Extension/` and registers its native messaging host. To test it locally, open `about:debugging` → **This Firefox** → **Load Temporary Add-on**, then select `~/Documents/Linux Download Manager Firefox Extension.zip`. The temporary add-on disappears when Firefox restarts. A permanent installation in standard Firefox requires a Mozilla-signed XPI; the source is ready for Mozilla Add-ons submission or unlisted signing. The Firefox and Chromium builds share the same video controls and native download manager.
+
 ## Usage
 
 ### Download files and batches
@@ -202,7 +208,7 @@ By default, files are organized under your system Downloads directory:
 
 LDM respects `XDG_DOWNLOAD_DIR`. A custom save folder becomes the base for the categorized library. Use **Show in folder** to find a file's exact location.
 
-**Remove from list (keep file)** and **Clear completed** only remove history entries. **Delete files and remove from list** also deletes the files after confirmation.
+**Remove from list (keep file)** removes one history entry. **Clear completed** removes only completed entries; paused, failed, and cancelled downloads remain in the list. Neither action deletes downloaded files. **Delete files and remove from list** also deletes the files after confirmation.
 
 Media progress metadata is stored in the application cache rather than beside the downloaded video. Partial transfers can require temporary disk space until final processing finishes.
 

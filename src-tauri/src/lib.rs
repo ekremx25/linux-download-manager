@@ -28,7 +28,7 @@ pub use browser::{
     stage_browser_request,
 };
 pub use platform::{
-    resolve_app_data_dir, resolve_browser_socket_path, resolve_default_download_dir,
+    package_firefox_extension, resolve_app_data_dir, resolve_browser_socket_path, resolve_default_download_dir,
 };
 
 /// Restores and focuses the existing main window. Never creates a window: the

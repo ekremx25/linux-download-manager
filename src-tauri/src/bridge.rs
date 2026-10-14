@@ -4,6 +4,7 @@ use crate::{
     jobs::{DownloadJobRequest, queue_download_request},
 };
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -116,6 +117,35 @@ async fn handle(app: &tauri::AppHandle, request: Value) -> Result<Value, String>
             }
             Ok(json!({"ok":true}))
         }
+        "refresh_failed_media" => {
+            let id = request.get("id").and_then(Value::as_i64).ok_or("Missing download id")?;
+            let old_url = request.get("oldUrl").and_then(Value::as_str).ok_or("Missing old URL")?;
+            let new_url = request.get("newUrl").and_then(Value::as_str).ok_or("Missing new URL")?;
+            if !same_media_asset(old_url, new_url) {
+                return Err("Replacement is not the same media asset".into());
+            }
+            let record = state.storage.get_download(id)?;
+            if record.status != "failed" || record.url != old_url || !record.error_message.as_deref().is_some_and(is_expired_media_error) {
+                return Err("Download is not a failed, expired media request".into());
+            }
+            let mut job = state.storage.load_resume_job(id)?.ok_or("Saved media request is unavailable")?;
+            if !job.stream_manifest || job.audio_url.is_some() || job.url != old_url {
+                return Err("This media request cannot be refreshed automatically".into());
+            }
+            let headers: HashMap<String, String> = serde_json::from_value(request.get("httpHeaders").cloned().unwrap_or_default())
+                .map_err(|_| "Invalid replacement headers")?;
+            if headers.len() > 32 || headers.iter().any(|(key, value)| key.len() > 80 || value.len() > 8192 || key.contains(['\r', '\n']) || value.contains(['\r', '\n'])) {
+                return Err("Replacement headers are too large or invalid".into());
+            }
+            job.url = new_url.to_owned();
+            job.fallback_urls.clear();
+            job.http_headers = headers;
+            job.scheduled_at = None;
+            state.storage.save_resume_job(&job)?;
+            state.storage.update_download_url(id, new_url)?;
+            crate::commands::resume_download(app.clone(), state, id).await?;
+            Ok(json!({"ok":true,"id":id}))
+        }
         "download" => {
             let job: DownloadJobRequest =
                 serde_json::from_value(request).map_err(|e| e.to_string())?;
@@ -123,5 +153,33 @@ async fn handle(app: &tauri::AppHandle, request: Value) -> Result<Value, String>
             Ok(json!({"ok":true,"id":record.id}))
         }
         _ => Err("Unknown browser action".into()),
+    }
+}
+
+fn is_expired_media_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    ["4xx", "403", "404", "410", "expired"].iter().any(|needle| error.contains(needle))
+}
+
+fn same_media_asset(old_url: &str, new_url: &str) -> bool {
+    let (Ok(old), Ok(new)) = (reqwest::Url::parse(old_url), reqwest::Url::parse(new_url)) else { return false };
+    matches!(old.scheme(), "http" | "https") && matches!(new.scheme(), "http" | "https")
+        && old != new && old.path() == new.path()
+        && (old.host_str() == new.host_str() || old.path().split('/').filter(|part| !part.is_empty()).count() >= 3)
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_new_url_for_the_same_media_is_accepted() {
+        assert!(same_media_asset("https://cdn.example/videos/42/master.m3u8?token=old", "https://cdn.example/videos/42/master.m3u8?token=new"));
+        assert!(same_media_asset("https://cdn-a.example/videos/42/master.m3u8?old", "https://cdn-b.example/videos/42/master.m3u8?new"));
+        assert!(!same_media_asset("https://cdn.example/videos/42/master.m3u8", "https://cdn.example/videos/43/master.m3u8"));
+        assert!(!same_media_asset("https://cdn.example/master.m3u8", "https://other.example/master.m3u8"));
+        assert!(!same_media_asset("https://cdn.example/videos/42/master.m3u8", "file:///videos/42/master.m3u8"));
+        assert!(is_expired_media_error("ffmpeg: Server returned 4XX Client Error"));
+        assert!(!is_expired_media_error("Could not write output file"));
     }
 }

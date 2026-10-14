@@ -64,6 +64,9 @@ APP_DATA_DIR="${XDG_DATA_HOME:-${INSTALL_HOME}/.local/share}/linux-download-mana
 DESKTOP_DIR="${XDG_DATA_HOME:-${INSTALL_HOME}/.local/share}/applications"
 ICON_DIR="${XDG_DATA_HOME:-${INSTALL_HOME}/.local/share}/icons/hicolor/256x256/apps"
 EXT_DIR="${INSTALL_HOME}/Documents/Linux Download Manager Extension"
+FIREFOX_EXT_DIR="${INSTALL_HOME}/Documents/Linux Download Manager Firefox Extension"
+FIREFOX_ZIP="${INSTALL_HOME}/Documents/Linux Download Manager Firefox Extension.zip"
+FIREFOX_EXTENSION_ID="ldm-bridge@ekremx25.github.io"
 
 NATIVE_HOST_NAME="com.eko.linuxdownloadmanager"
 NATIVE_HOST_BIN="${APP_DATA_DIR}/bin/browser_native_host"
@@ -191,6 +194,15 @@ install_extension() {
   for file in manifest.json service-worker.js player-manifest-observer.js youtube-audio-observer.js content-script.js content-style.css popup.html popup.js popup.css; do
     install_atomic 0644 "browser/chromium/$file" "${EXT_DIR}/$file"
   done
+  log "Copying Firefox extension → ${FIREFOX_EXT_DIR}"
+  mkdir -p "${FIREFOX_EXT_DIR}"
+  install_atomic 0644 "browser/firefox/manifest.json" "${FIREFOX_EXT_DIR}/manifest.json"
+  for file in service-worker.js player-manifest-observer.js youtube-audio-observer.js content-script.js content-style.css popup.html popup.js popup.css; do
+    install_atomic 0644 "browser/chromium/$file" "${FIREFOX_EXT_DIR}/$file"
+  done
+  "${BIN_DIR}/linux-download-manager" --package-firefox-extension "${FIREFOX_EXT_DIR}" "${FIREFOX_ZIP}" \
+    || die "Could not create the Firefox extension ZIP file."
+  info "    Firefox ZIP → ${FIREFOX_ZIP}"
 }
 
 install_desktop_entry() {
@@ -323,6 +335,20 @@ EOF
       info "    → $(basename "${parent}")"
     fi
   done
+  if [[ -d "${INSTALL_HOME}/.mozilla" ]] || command -v firefox >/dev/null 2>&1; then
+    local firefox_host_dir="${INSTALL_HOME}/.mozilla/native-messaging-hosts"
+    mkdir -p "${firefox_host_dir}"
+    cat > "${firefox_host_dir}/${NATIVE_HOST_NAME}.json" <<EOF
+{
+  "name": "${NATIVE_HOST_NAME}",
+  "description": "Native messaging bridge for Linux Download Manager",
+  "path": "${NATIVE_HOST_BIN}",
+  "type": "stdio",
+  "allowed_extensions": ["${FIREFOX_EXTENSION_ID}"]
+}
+EOF
+    info "    → Firefox"
+  fi
 }
 
 # ── Post-install hint ─────────────────────────────────────────────────────────
@@ -340,6 +366,10 @@ final_instructions() {
   echo "     3. Click ${BOLD}Load unpacked${RESET}"
   echo "     4. Select: ${BOLD}${EXT_DIR}${RESET}"
   echo "     5. Reload the extension after updating its files"
+  echo "  Firefox test: about:debugging → This Firefox → Load Temporary Add-on"
+  echo "     Select: ${BOLD}${FIREFOX_ZIP}${RESET}"
+  echo "     A signed Firefox add-on is required for installation that survives a restart."
+  echo "  Visual guide: ${BOLD}https://github.com/ekremx25/linux-download-manager/blob/main/docs/extension-install-tr.md${RESET}"
   echo
   printf '  Uninstall: bash "%s/uninstall.sh"\n' "$APP_DATA_DIR"
   echo
@@ -366,6 +396,13 @@ backup_installation() {
     fi
   done
   if [[ -d "$EXT_DIR" ]]; then mkdir -p "$BACKUP_DIR$(dirname "$EXT_DIR")"; cp -a -- "$EXT_DIR" "$BACKUP_DIR$EXT_DIR"; fi
+  if [[ -d "$FIREFOX_EXT_DIR" ]]; then mkdir -p "$BACKUP_DIR$(dirname "$FIREFOX_EXT_DIR")"; cp -a -- "$FIREFOX_EXT_DIR" "$BACKUP_DIR$FIREFOX_EXT_DIR"; fi
+  if [[ -f "$FIREFOX_ZIP" ]]; then mkdir -p "$BACKUP_DIR$(dirname "$FIREFOX_ZIP")"; cp -a -- "$FIREFOX_ZIP" "$BACKUP_DIR$FIREFOX_ZIP"; fi
+  if [[ -f "${INSTALL_HOME}/.mozilla/native-messaging-hosts/${NATIVE_HOST_NAME}.json" ]]; then
+    local firefox_manifest="${INSTALL_HOME}/.mozilla/native-messaging-hosts/${NATIVE_HOST_NAME}.json"
+    mkdir -p "$BACKUP_DIR$(dirname "$firefox_manifest")"
+    cp -p -- "$firefox_manifest" "$BACKUP_DIR$firefox_manifest"
+  fi
   while IFS= read -r file; do
     mkdir -p "$BACKUP_DIR$(dirname "$file")"; cp -p -- "$file" "$BACKUP_DIR$file"
   done < <(find "${INSTALL_HOME}/.config" -maxdepth 4 -name "${NATIVE_HOST_NAME}.json" -type f 2>/dev/null || true)
@@ -415,6 +452,7 @@ done
 for file in manifest.json service-worker.js player-manifest-observer.js youtube-audio-observer.js content-script.js content-style.css popup.html popup.js popup.css; do
   [[ -f "browser/chromium/$file" ]] || die "Missing extension file: $file"
 done
+[[ -f browser/firefox/manifest.json ]] || die "Missing Firefox extension manifest."
 [[ -f src-tauri/icons/icon.png ]] || die "Application icon is missing."
 if [[ "$MODE" == prebuilt && -f SHA256SUMS ]]; then
   sha256sum --check --quiet SHA256SUMS || die "Package integrity check failed; nothing was installed."

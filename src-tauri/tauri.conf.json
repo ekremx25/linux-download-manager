@@ -62,7 +62,8 @@
     ],
     "resources": [
       "icons/icon.png",
-      "../browser/chromium/"
+      "../browser/chromium/",
+      "../browser/firefox/manifest.json"
     ],
     "linux": {
       "appimage": {

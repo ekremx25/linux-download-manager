@@ -33,6 +33,36 @@ assert.equal(chosen.capture.sourcePageUrl,'https://hotstream.club/embed/main');
 assert.deepEqual(Array.from(chosen.capture.fallbackUrls),[],'trailer must not become a fallback');
 assert.equal(vm.runInContext("candidateBelongsToPlayer({referrerUrl:'https://hotstream.club/embed/other'},'https://hotstream.club/embed/main')",worker),false);
 console.log('PASS: selected player stream wins; trailers and unrelated fallback URLs excluded');
+vm.runInContext(`
+rememberMediaRequest(12,'https://cdn.example/video_720p.m3u8','observed-manifest','https://player.example/embed/main');
+rememberMediaRequest(12,'https://cdn.example/video_1080p.m3u8','observed-manifest','https://player.example/embed/main');
+rememberMediaRequest(12,'https://cdn.example/audio.m3u8','audio','https://player.example/embed/main');
+rememberMediaRequest(12,'https://ads.example/trailer_720p.m3u8','observed-manifest','https://ads.example/embed/ad');
+`,worker);
+const options=vm.runInContext("mediaOptionsForTab(12,'https://player.example/embed/main')",worker);
+assert.equal(options.length,2);
+assert.ok(options.some(option=>option.label.includes('1080p')));
+assert.ok(options.every(option=>option.url.startsWith('https://cdn.example/')));
+console.log('PASS: player stream chooser lists resolutions without audio-only or ad streams');
+const refreshedStream=vm.runInContext(`replacementForMediaJob(
+ {url:'https://cdn.example/videos/42/master.m3u8?token=old',referrerUrl:'https://player.example/embed/main'},
+ [{url:'https://ads.example/videos/42/master.m3u8?token=new',streamKind:'playlist',referrerUrl:'https://ads.example/embed/ad'},
+  {url:'https://cdn.example/videos/43/master.m3u8?token=new',streamKind:'playlist',referrerUrl:'https://player.example/embed/main'},
+  {url:'https://cdn.example/videos/42/master.m3u8?token=new',streamKind:'playlist',referrerUrl:'https://player.example/embed/main'}])`,worker);
+assert.equal(refreshedStream.url,'https://cdn.example/videos/42/master.m3u8?token=new');
+assert.equal(vm.runInContext(`replacementForMediaJob(
+ {url:'https://cdn.example/videos/42/master.m3u8?token=old',referrerUrl:'https://player.example/embed/main'},
+ [{url:'https://cdn.example/videos/43/master.m3u8?token=new',streamKind:'playlist',referrerUrl:'https://player.example/embed/main'}])`,worker),null);
+console.log('PASS: expired video recovery selects only a new link for the same player and media path');
+
+vm.runInContext("rememberMediaRequest(15,'https://cdn.example/master.m3u8','observed-manifest','https://player.example/embed/main',{'x-test-header':'observed'})",worker);
+const direct=vm.runInContext("buildDirectCapturePayload(15,{url:'https://cdn.example/master.m3u8',sourcePageUrl:'https://outer.example/film'},null)",worker);
+assert.equal(direct.sourcePageUrl,'https://player.example/embed/main');
+assert.equal(direct.httpHeaders.referer,'https://player.example/embed/main');
+assert.equal(direct.httpHeaders.origin,'https://player.example');
+assert.equal(direct.httpHeaders['x-test-header'],'observed');
+assert.equal(direct.streamManifest,true);
+console.log('PASS: direct capture carries observed player headers and referrer');
 
 // Player responses with misleading MIME types can still identify an HLS manifest.
 const published=[];
@@ -214,6 +244,19 @@ assert.equal(c.clickedPlayer,currentEmbedUrl,'click must use the current player,
 attached[0].isConnected=false;
 vm.runInContext('refreshMediaOverlay()',c);
 assert.equal(attached[0].isConnected,true,'a removed button must be reattached');
+const adFrame=frame('https://ads.example/embed/banner',320,180,80);
+adFrame.isConnected=true;
+c.adFrame=adFrame;c.visibleEmbed=visibleEmbed;
+c.document.querySelectorAll=selector=>{
+ if(selector==='iframe[src], iframe[data-src]')return [adFrame,visibleEmbed];
+ throw new Error('Generic scan must not run for an identified player');
+};
+vm.runInContext('refreshMediaOverlay()',c);
+assert.equal(attached.filter(button=>button.isConnected).length,1,'ad iframe must not get a second button');
+assert.equal(vm.runInContext('siteDownloadButtons.has(visibleEmbed)',c),true);
+assert.equal(vm.runInContext('siteDownloadButtons.has(adFrame)',c),false);
+vm.runInContext('hoverButton={hidden:false};activeCandidate={element:visibleEmbed,kind:"media-fallback"};repositionHoverButton()',c);
+assert.equal(vm.runInContext('hoverButton.hidden',c),true,'hover button must stay hidden beside the player button');
 console.log('PASS: embed button renders without generic scanning, persists without duplicates, and captures current player');
 
 // Generic iframe paths become controllable only after a video stream is
@@ -248,3 +291,28 @@ vm.runInContext('detectedPlayerPages.clear(); refreshRecentMediaCandidates()',c)
 assert.equal(vm.runInContext("detectedPlayerPages.has('https://cdn.player.example/v/opaque')",c),true);
 assert.equal(overlayScheduled,1);
 console.log('PASS: network video detection refreshes generic player overlay after playback');
+
+// A withdrawn signed playlist may have a working mirror for the same asset.
+// Keep a different video and a different page out of the fallback list.
+vm.runInContext(`
+rememberMediaRequest(88,'https://mirror-b.example/hls/video-42/master.m3u8?token=old','observed-manifest','https://site.example/watch/42');
+rememberMediaRequest(88,'https://mirror-a.example/hls/video-42/master.m3u8?token=new','observed-manifest','https://site.example/watch/42');
+rememberMediaRequest(88,'https://mirror-c.example/hls/trailer-99/master.m3u8','observed-manifest','https://site.example/watch/42');
+rememberMediaRequest(88,'https://mirror-d.example/hls/video-42/master.m3u8','observed-manifest','https://site.example/watch/other');
+`,worker);
+const mirrorChoice=vm.runInContext("chooseBestMediaCapturePayload(88,'https://mirror-a.example/hls/video-42/master.m3u8?token=new','https://site.example/watch/42','Video')",worker);
+assert.equal(mirrorChoice.ok,true);
+assert.deepEqual(Array.from(mirrorChoice.capture.fallbackUrls),['https://mirror-b.example/hls/video-42/master.m3u8?token=old']);
+console.log('PASS: alternate signed playlist retried only for the same video and page');
+
+// An observed playlist can receive 410 after its request was recorded. The
+// rejected address must not outrank a successful stream from the same page.
+vm.runInContext(`
+rememberMediaRequest(89,'https://good-cdn.example/hls/video-7/master.m3u8','observed-manifest','https://site.example/watch/7');
+rememberMediaRequest(89,'https://bad-cdn.example/hls/video-7/master.m3u8','observed-manifest','https://site.example/watch/7');
+discardRejectedMediaRequest(89,'https://bad-cdn.example/hls/video-7/master.m3u8');
+`,worker);
+assert.equal(vm.runInContext('getMediaCandidatesForTab(89).length',worker),1);
+const recovered=vm.runInContext("chooseBestMediaCapturePayload(89,'https://bad-cdn.example/hls/video-7/master.m3u8','https://site.example/watch/7','Video')",worker);
+assert.equal(recovered.capture.url,'https://good-cdn.example/hls/video-7/master.m3u8');
+console.log('PASS: rejected 410 playlist discarded and working stream selected');

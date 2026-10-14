@@ -162,6 +162,11 @@ function overlayDiagnostic() {
 
 function bootstrap() {
   chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+    if (message?.type === "report-media-now") {
+      reportObservedMediaCandidates();
+      respond({ok: true});
+      return;
+    }
     if (message?.type !== "capture-overlay-diagnostic") return;
     try { respond(overlayDiagnostic()); } catch (error) { respond({error: String(error)}); }
   });
@@ -427,7 +432,7 @@ function showQualityPicker(candidate, anchorElement) {
 
   const title = document.createElement("div");
   title.className = "ldm-quality-title";
-  title.textContent = "Download video";
+  title.textContent = "Download this video";
   const close = document.createElement("button");
   close.className = "ldm-quality-close";
   close.textContent = "×";
@@ -437,19 +442,31 @@ function showQualityPicker(candidate, anchorElement) {
   picker.appendChild(title);
   const containerLabel=document.createElement('label');
   containerLabel.className='ldm-quality-container';
-  containerLabel.textContent='Video format';
+  containerLabel.textContent='Save video as';
   const container=document.createElement('select');
   container.setAttribute('aria-label','Video format');
-  for(const [value,label] of [['','Use saved format'],['mp4','MP4'],['mkv','MKV'],['webm','WebM']]){
+  for(const [value,label] of [['mp4','MP4'],['mkv','MKV'],['mov','MOV']]){
     const option=document.createElement('option');option.value=value;option.textContent=label;container.appendChild(option);
   }
   containerLabel.appendChild(container);picker.appendChild(containerLabel);
 
+  const videoHeading = document.createElement("div");
+  videoHeading.className = "ldm-quality-section";
+  videoHeading.textContent = "VIDEO QUALITY";
+  picker.appendChild(videoHeading);
+
   for (const quality of qualities) {
+    if (quality.outputContainer === "mp3") {
+      const audioHeading = document.createElement("div");
+      audioHeading.className = "ldm-quality-section ldm-quality-section-audio";
+      audioHeading.textContent = "AUDIO ONLY";
+      picker.appendChild(audioHeading);
+    }
     const btn = document.createElement("button");
     btn.type = "button";
     btn.textContent = quality.label;
     btn.className = "ldm-quality-option";
+    btn.classList.add(quality.outputContainer === "mp3" || quality.outputContainer === "m4a" ? "ldm-quality-audio" : "ldm-quality-video");
     btn.addEventListener("pointerdown", (e) => e.stopPropagation());
     btn.addEventListener("click", (event) => {
       event.preventDefault();
@@ -479,6 +496,46 @@ function showQualityPicker(candidate, anchorElement) {
   close.focus({preventScroll:true});
 
   document.addEventListener("pointerdown", handleQualityPickerOutsideClick, true);
+}
+
+function showDetectedMediaPicker(candidate, anchorElement, options) {
+  closeQualityPicker();
+  const picker = document.createElement("div");
+  picker.id = "ldm-quality-picker";
+  picker.className = "ldm-quality-picker";
+  picker.setAttribute("role", "menu");
+  picker.setAttribute("aria-label", "Detected video streams");
+  const title = document.createElement("div");
+  title.className = "ldm-quality-title";
+  title.textContent = "Detected videos";
+  picker.appendChild(title);
+  for (const option of options) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ldm-quality-option";
+    button.textContent = option.label;
+    button.addEventListener("pointerdown", event => event.stopPropagation());
+    button.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeQualityPicker();
+      triggerCaptureWithFormat({...candidate, url: option.url}, null);
+    });
+    picker.appendChild(button);
+  }
+  const rect = anchorElement?.getBoundingClientRect();
+  if (!rect) return;
+  const top = rect.bottom + 6;
+  picker.style.setProperty("top", `${top}px`, "important");
+  picker.style.setProperty("left", `${Math.max(8, Math.min(rect.right - 260, window.innerWidth - 268))}px`, "important");
+  picker.style.setProperty("max-height", `${Math.max(40, window.innerHeight - top - 8)}px`, "important");
+  picker.ldmAnchor = anchorElement;
+  anchorElement.setAttribute("aria-expanded", "true");
+  picker.addEventListener("keydown", event => { if (event.key === "Escape") closeQualityPicker(); });
+  document.documentElement.appendChild(picker);
+  document.addEventListener("pointerdown", handleQualityPickerOutsideClick, true);
+  document.addEventListener("scroll", handleQualityPickerScroll, true);
+  window.addEventListener("resize", closeQualityPicker);
 }
 
 function handleQualityPickerScroll(event){
@@ -580,7 +637,18 @@ function triggerCaptureForCandidate(candidate, anchorElement) {
       if(!response?.ok){showToast(response?.error||'Could not read video preferences. Open LDM and try again.','error');return;}
       if(response.showVideoQualityMenu){showQualityPicker(candidate,anchorElement);return;}
       const saved=response.preferences?.container;
-      triggerCaptureWithFormat(candidate,'bv*+ba/b',['mp4','mkv','webm'].includes(saved)?saved:'mp4');
+      triggerCaptureWithFormat(candidate,'bv*+ba/b',['mp4','mkv','mov'].includes(saved)?saved:'mp4');
+    });
+    return;
+  }
+
+  if ((candidate.kind === "media" || candidate.kind === "media-fallback") && anchorElement) {
+    sendExtensionMessage({type: "list-media-options", playerPageUrl: candidate.playerPageUrl ?? null}, response => {
+      if (response?.ok && response.options?.length > 1) {
+        showDetectedMediaPicker(candidate, anchorElement, response.options);
+      } else {
+        triggerCaptureWithFormat(candidate, null);
+      }
     });
     return;
   }
@@ -611,7 +679,8 @@ function pulseHoverButton() {
 
 function repositionHoverButton() {
   refreshSiteButtonPositions();
-  if (mediaOverlayRoot?.childElementCount > 0) {
+  if (mediaOverlayRoot?.childElementCount > 0 ||
+      Array.from(siteDownloadButtons.values()).some(button => button.isConnected && !button.hidden)) {
     if (hoverButton) hoverButton.hidden = true;
     return;
   }
@@ -1264,9 +1333,21 @@ function candidateFromPlayerFrame(frame) {
 }
 
 function injectEmbeddedPlayerButtons() {
+  const frames = Array.from(document.querySelectorAll("iframe[src], iframe[data-src]"));
+  const candidates = frames.map(frame => ({frame, candidate: candidateFromPlayerFrame(frame)}))
+    .filter(item => item.candidate);
+  // A film page can contain ad and player iframes at once. Keep one control on
+  // the largest visible player instead of flashing one control per iframe.
+  const primary = candidates.reduce((best, item) => {
+    const rect = item.frame.getBoundingClientRect();
+    const visibleWidth = Math.max(0, Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0));
+    const visibleHeight = Math.max(0, Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0));
+    const score = visibleWidth * visibleHeight;
+    return !best || score > best.score ? {...item, score} : best;
+  }, null);
   let visible = false;
-  for (const frame of document.querySelectorAll("iframe[src], iframe[data-src]")) {
-    const candidate = candidateFromPlayerFrame(frame);
+  for (const frame of frames) {
+    const candidate = frame === primary?.frame ? primary.candidate : null;
     const existing = siteDownloadButtons.get(frame);
     if (!candidate) {
       if (existing) { existing.remove(); siteDownloadButtons.delete(frame); }

@@ -93,6 +93,15 @@ impl Storage {
         Ok(())
     }
 
+    pub fn update_download_url(&self, id: i64, url: &str) -> Result<(), String> {
+        self.connection
+            .lock()
+            .unwrap()
+            .execute("UPDATE downloads SET url = ?1 WHERE id = ?2", params![url, id])
+            .map_err(|e| format!("failed to update download URL: {e}"))?;
+        Ok(())
+    }
+
     pub fn load_resume_job(&self, id: i64) -> Result<Option<crate::app::QueuedDownload>, String> {
         let json: Option<String> = self
             .connection
@@ -263,7 +272,7 @@ impl Storage {
         let connection = self.connection.lock().unwrap();
         let count = connection
             .execute(
-                "DELETE FROM downloads WHERE status IN ('completed', 'failed', 'cancelled')",
+                "DELETE FROM downloads WHERE status = 'completed'",
                 [],
             )
             .map_err(|error| format!("failed to clear completed downloads: {error}"))?;
@@ -431,6 +440,25 @@ mod category_tests {
         );
         assert_eq!(reopened.get_download(iso).unwrap().category, "iso");
         assert_eq!(reopened.get_download(video).unwrap().category, "video");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_completed_keeps_stopped_and_failed_downloads() {
+        let (dir, storage) = temp_db("clear-completed");
+        for status in ["completed", "paused", "failed", "cancelled"] {
+            let id = insert(&storage, &format!("{status}.mp4"), "video");
+            storage.set_status(id, status, 0, None, None).unwrap();
+        }
+
+        assert_eq!(storage.delete_completed().unwrap(), 1);
+        let remaining = storage.list_downloads().unwrap();
+        assert_eq!(remaining.len(), 3);
+        assert!(remaining.iter().all(|record| record.status != "completed"));
+        assert!(remaining.iter().any(|record| record.status == "paused"));
+        assert!(remaining.iter().any(|record| record.status == "failed"));
+        assert!(remaining.iter().any(|record| record.status == "cancelled"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

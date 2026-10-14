@@ -37,7 +37,7 @@ impl TransferPreferences {
         if ![0, 360, 480, 720, 1080, 1440, 2160, 4320].contains(&self.max_height) {
             return Err("Unsupported video resolution".into());
         }
-        if !["mp4", "mkv", "webm", "mp3", "m4a"].contains(&self.container.as_str()) {
+        if !["mp4", "mkv", "mov", "webm", "mp3", "m4a"].contains(&self.container.as_str()) {
             return Err("Unsupported output format".into());
         }
         Ok(())

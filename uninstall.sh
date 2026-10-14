@@ -20,11 +20,15 @@ rm -f -- "$install_home/.local/bin/linux-download-manager" \
 # Only the known extension files are removed, never arbitrary files in the folder.
 for file in manifest.json service-worker.js player-manifest-observer.js youtube-audio-observer.js content-script.js content-style.css popup.html popup.js popup.css; do
   rm -f -- "$install_home/Documents/Linux Download Manager Extension/$file"
+  rm -f -- "$install_home/Documents/Linux Download Manager Firefox Extension/$file"
 done
 rmdir "$install_home/Documents/Linux Download Manager Extension" 2>/dev/null || true
+rmdir "$install_home/Documents/Linux Download Manager Firefox Extension" 2>/dev/null || true
+rm -f -- "$install_home/Documents/Linux Download Manager Firefox Extension.zip"
 for browser in google-chrome chromium BraveSoftware/Brave-Browser microsoft-edge-dev microsoft-edge vivaldi; do
   rm -f -- "$install_home/.config/$browser/NativeMessagingHosts/com.eko.linuxdownloadmanager.json"
 done
+rm -f -- "$install_home/.mozilla/native-messaging-hosts/com.eko.linuxdownloadmanager.json"
 command -v update-desktop-database >/dev/null && update-desktop-database "$data/applications" 2>/dev/null || true
 echo 'Application uninstalled. Close any running session and remove the LDM browser extension.'
 echo "Download history and backups are preserved: $data/linux-download-manager-custom"

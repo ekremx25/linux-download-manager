@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader, BufWriter};
+use tokio::sync::watch;
 
 /// Byte counts always refer to the current transfer (video/audio may be separate).
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +47,7 @@ const SEGMENT_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 /// routinely drop some of several parallel range connections.
 const SEGMENT_MAX_ATTEMPTS: u32 = 3;
 const SEGMENT_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
+const DYNAMIC_SPLIT_MIN_REMAINING: u64 = 2 * 1024 * 1024;
 /// Used when the browser extension captured no User-Agent for a media request.
 const FALLBACK_MEDIA_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const STREAM_MANIFEST_CONTENT_TYPES: &[&str] = &[
@@ -453,6 +455,7 @@ impl DownloadService {
                     end: segment.end,
                 });
             }
+            details.sort_by_key(|part| part.start);
             return Ok(details);
         }
 
@@ -618,6 +621,7 @@ impl DownloadService {
                     &url,
                     target_path,
                     manifest,
+                    transfer.connections,
                     throttle,
                     &mut on_started,
                     &mut on_progress,
@@ -639,6 +643,7 @@ impl DownloadService {
                     &url,
                     target_path,
                     manifest,
+                    transfer.connections,
                     throttle,
                     &mut on_started,
                     &mut on_progress,
@@ -1328,6 +1333,7 @@ impl DownloadService {
         total: u64,
         downloaded: Arc<AtomicU64>,
         throttle: Option<Arc<BandwidthThrottle>>,
+        mut split_requested: watch::Receiver<bool>,
     ) -> (usize, Result<(), SegmentFailure>) {
         let result = async {
             let path = self.segment_path_for(target, segment.index);
@@ -1383,7 +1389,23 @@ impl DownloadService {
                 .await
                 .map_err(|e| SegmentFailure::Fatal(e.to_string()))?;
             let mut stream = response.bytes_stream();
-            while let Some(chunk) = stream.next().await {
+            let mut split_channel_open = true;
+            loop {
+                let next = tokio::select! {
+                    changed = split_requested.changed(), if split_channel_open => {
+                        if changed.is_err() {
+                            split_channel_open = false;
+                            continue;
+                        }
+                        if changed.is_ok() && *split_requested.borrow_and_update() {
+                            file.flush().await.map_err(|e| SegmentFailure::Fatal(e.to_string()))?;
+                            return Err(SegmentFailure::Split);
+                        }
+                        continue;
+                    }
+                    next = stream.next() => next,
+                };
+                let Some(chunk) = next else { break };
                 let chunk = chunk
                     .map_err(|e| SegmentFailure::Retry(e.to_string(), Duration::ZERO, false))?;
                 if received + chunk.len() as u64 > expected {
@@ -1421,12 +1443,17 @@ impl DownloadService {
         url: &Url,
         target_path: &Path,
         manifest: SegmentedDownloadManifest,
+        requested_connections: usize,
         throttle: Option<Arc<BandwidthThrottle>>,
         on_started: &mut impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
         on_progress: &mut impl FnMut(DownloadProgress) -> Result<(), String>,
     ) -> Result<(u64, Option<u64>, usize), String> {
         let total_bytes = manifest.total_bytes;
-        let segment_count = manifest.segments.len();
+        let max_parallel = if requested_connections == 0 {
+            manifest.segments.len().clamp(1, 16)
+        } else {
+            requested_connections.clamp(1, 16)
+        };
 
         // Real progress comes from the segment files on disk, never from the
         // manifest. A merge that failed part way through deletes the segments it
@@ -1459,7 +1486,7 @@ impl DownloadService {
         }
         self.save_segment_manifest(target_path, &manifest).await?;
 
-        on_started(initial_bytes, Some(total_bytes), segment_count)?;
+        on_started(initial_bytes, Some(total_bytes), manifest.segments.len())?;
 
         // Progress accumulates in a shared atomic rather than a bounded
         // channel. The channel's consumer only ran after the whole segment set
@@ -1476,8 +1503,10 @@ impl DownloadService {
             .enumerate()
             .filter_map(|(i, (_, done))| if *done { None } else { Some(i) })
             .collect();
-        let mut attempts = vec![0u32; segment_count];
-        let mut limit = segment_count;
+        let mut attempts = vec![0u32; manifest.segments.len()];
+        let mut limit = max_parallel.min(manifest.segments.len());
+        let mut split_signals: HashMap<usize, watch::Sender<bool>> = HashMap::new();
+        let mut split_in_progress = false;
         let mut ready_at = Instant::now();
         let mut ticker = tokio::time::interval(Duration::from_millis(200));
         let mut failure = None;
@@ -1486,6 +1515,8 @@ impl DownloadService {
             while futures.len() < limit && Instant::now() >= ready_at {
                 let Some(i) = pending.pop_front() else { break };
                 attempts[i] += 1;
+                let (split_tx, split_rx) = watch::channel(false);
+                split_signals.insert(i, split_tx);
                 futures.push(self.fetch_segment(
                     url,
                     target_path,
@@ -1493,6 +1524,7 @@ impl DownloadService {
                     total_bytes,
                     downloaded.clone(),
                     throttle.clone(),
+                    split_rx,
                 ));
             }
             if futures.is_empty() && pending.is_empty() {
@@ -1504,8 +1536,24 @@ impl DownloadService {
                 }
                 result = futures.next(), if !futures.is_empty() => {
                     let Some((i,result)) = result else {continue};
+                    if split_signals.remove(&i).is_some_and(|signal| *signal.borrow()) {
+                        split_in_progress = false;
+                    }
                     match result {
-                        Ok(()) => { limit = (limit+1).min(segment_count); }
+                        Ok(()) => { limit = (limit+1).min(max_parallel); }
+                        Err(SegmentFailure::Split) => {
+                            split_in_progress = false;
+                            let (on_disk, _) = self.segment_progress_on_disk(target_path, &manifest.segments[i]).await;
+                            if let Some(new_indexes) = split_remaining_segment(&mut manifest, i, on_disk, limit.saturating_sub(futures.len())) {
+                                self.save_segment_manifest(target_path, &manifest).await?;
+                                attempts.resize(manifest.segments.len(), 0);
+                                for new_index in new_indexes {
+                                    pending.push_back(new_index);
+                                }
+                            } else {
+                                pending.push_back(i);
+                            }
+                        }
                         Err(SegmentFailure::RangeIgnored) => {fallback=true; break;}
                         Err(SegmentFailure::Retry(message, delay, throttled)) => {
                             if attempts[i] >= SEGMENT_MAX_ATTEMPTS {failure=Some(message); break;}
@@ -1517,6 +1565,22 @@ impl DownloadService {
                         Err(SegmentFailure::Fatal(message)) => {failure=Some(message); break;}
                     }
                     on_progress(DownloadProgress::bytes(downloaded.load(Ordering::Relaxed), Some(total_bytes), futures.len()))?;
+                }
+            }
+            if pending.is_empty() && futures.len() < limit && !split_in_progress {
+                let mut largest = None;
+                for (&active, signal) in &split_signals {
+                    if *signal.borrow() { continue; }
+                    let (on_disk, _) = self.segment_progress_on_disk(target_path, &manifest.segments[active]).await;
+                    let remaining = manifest.segments[active].end.saturating_sub(manifest.segments[active].start.saturating_add(on_disk)).saturating_add(1);
+                    if on_disk > 0 && remaining >= DYNAMIC_SPLIT_MIN_REMAINING && largest.map_or(true, |(_, best)| remaining > best) {
+                        largest = Some((active, remaining));
+                    }
+                }
+                if let Some((active, _)) = largest {
+                    if split_signals.get(&active).is_some_and(|signal| signal.send(true).is_ok()) {
+                        split_in_progress = true;
+                    }
                 }
             }
         }
@@ -1547,7 +1611,9 @@ impl DownloadService {
             .await
             .map_err(|error| format!("failed to create merged output: {error}"))?;
 
-        for segment in &manifest.segments {
+        let mut ordered_segments: Vec<_> = manifest.segments.iter().collect();
+        ordered_segments.sort_by_key(|segment| segment.start);
+        for segment in ordered_segments {
             let seg_path = self.segment_path_for(target_path, segment.index);
             let (on_disk, complete) = self.segment_progress_on_disk(target_path, segment).await;
             if !complete {
@@ -1583,11 +1649,12 @@ impl DownloadService {
         let _ = fs::remove_file(&manifest_path).await;
 
         let final_bytes = downloaded.load(Ordering::Relaxed);
-        Ok((final_bytes, Some(total_bytes), segment_count))
+        Ok((final_bytes, Some(total_bytes), manifest.segments.len()))
     }
 }
 
 enum SegmentFailure {
+    Split,
     RangeIgnored,
     Retry(String, Duration, bool),
     Fatal(String),
@@ -2284,6 +2351,49 @@ fn ensure_ffmpeg_available() -> Result<(), String> {
 fn build_segment_manifest(total_bytes: u64) -> SegmentedDownloadManifest {
     build_segment_manifest_with_count(total_bytes, 0)
 }
+
+/// Keep the downloaded prefix and offer the unreceived tail to idle workers.
+/// Existing segment indexes never change, so pause/resume can reuse every file.
+fn split_remaining_segment(
+    manifest: &mut SegmentedDownloadManifest,
+    index: usize,
+    downloaded_bytes: u64,
+    available_slots: usize,
+) -> Option<std::ops::Range<usize>> {
+    let segment = manifest.segments.get(index)?;
+    let length = segment.end.checked_sub(segment.start)?.checked_add(1)?;
+    if downloaded_bytes == 0 || downloaded_bytes >= length || available_slots < 2 {
+        return None;
+    }
+    let remaining = length - downloaded_bytes;
+    if remaining < DYNAMIC_SPLIT_MIN_REMAINING || manifest.segments.len() >= 64 {
+        return None;
+    }
+    let pieces = available_slots
+        .min((remaining / (1024 * 1024)) as usize)
+        .min(64 - manifest.segments.len());
+    if pieces < 2 {
+        return None;
+    }
+    let first = manifest.segments.len();
+    let mut start = segment.start + downloaded_bytes;
+    let old_end = segment.end;
+    manifest.segments[index].end = start - 1;
+    manifest.segments[index].downloaded_bytes = downloaded_bytes;
+    let base = remaining / pieces as u64;
+    for part in 0..pieces {
+        let end = if part + 1 == pieces { old_end } else { start + base - 1 };
+        manifest.segments.push(SegmentPart {
+            index: first + part,
+            start,
+            end,
+            downloaded_bytes: 0,
+        });
+        start = end + 1;
+    }
+    Some(first..manifest.segments.len())
+}
+
 fn build_segment_manifest_with_count(
     total_bytes: u64,
     requested: usize,
@@ -2367,6 +2477,28 @@ mod segment_tests {
                 result.unwrap();
             }
         }
+    }
+
+    #[test]
+    fn dynamic_split_keeps_downloaded_prefix_and_covers_the_tail() {
+        let mut manifest = build_segment_manifest_with_count(16 * 1024 * 1024, 2);
+        let old_end = manifest.segments[0].end;
+        let prefix = 1024 * 1024;
+        let added = split_remaining_segment(&mut manifest, 0, prefix, 3).unwrap();
+        assert_eq!(added, 2..5);
+        assert_eq!(manifest.segments[0].end, prefix - 1);
+        assert_eq!(manifest.segments[0].downloaded_bytes, prefix);
+        let mut ranges: Vec<_> = manifest.segments.iter().map(|s| (s.start, s.end)).collect();
+        ranges.sort_unstable();
+        assert_eq!(ranges.first().unwrap().0, 0);
+        assert_eq!(ranges.last().unwrap().1, 16 * 1024 * 1024 - 1);
+        assert!(ranges.windows(2).all(|pair| pair[0].1 + 1 == pair[1].0));
+        assert_eq!(manifest.segments[added.start].start, prefix);
+        assert_eq!(manifest.segments[added.end - 1].end, old_end);
+        let encoded = serde_json::to_string(&manifest).unwrap();
+        let resumed: SegmentedDownloadManifest = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(resumed.segments.len(), 5);
+        assert!(split_remaining_segment(&mut manifest, 0, prefix, 3).is_none());
     }
 
     #[tokio::test]
@@ -2895,6 +3027,62 @@ mod segment_tests {
     }
 
     #[tokio::test]
+    async fn idle_connection_splits_slow_range_without_losing_bytes() {
+        use tokio::net::TcpListener;
+        let dir = TestDir::new();
+        let target = dir.target();
+        let body_len = 16 * 1024 * 1024usize;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                let observed = observed.clone();
+                tokio::spawn(async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    let mut request = Vec::new();
+                    let mut buffer = [0u8; 1024];
+                    loop {
+                        let Ok(read) = socket.read(&mut buffer).await else { return };
+                        if read == 0 { return; }
+                        request.extend_from_slice(&buffer[..read]);
+                        if request.windows(4).any(|window| window == b"\r\n\r\n") { break; }
+                    }
+                    let text = String::from_utf8_lossy(&request).to_lowercase();
+                    let Some((start, end)) = text.lines()
+                        .find_map(|line| line.strip_prefix("range: bytes="))
+                        .and_then(|value| value.trim().split_once('-'))
+                        .and_then(|(a,b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))) else { return };
+                    let header = format!("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{body_len}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", end - start + 1);
+                    if socket.write_all(header.as_bytes()).await.is_err() { return; }
+                    let mut offset = start;
+                    while offset <= end {
+                        let next = (offset + 64 * 1024).min(end + 1);
+                        let body: Vec<u8> = (offset..next).map(|n| (n % 251) as u8).collect();
+                        if socket.write_all(&body).await.is_err() { return; }
+                        offset = next;
+                        if start == 0 { tokio::time::sleep(Duration::from_millis(12)).await; }
+                    }
+                });
+            }
+        });
+        let service = DownloadService::new(Client::new());
+        let url = Url::parse(&format!("http://{addr}/file.bin")).unwrap();
+        let result = service.download_with_segments(
+            &url, &target, build_segment_manifest_with_count(body_len as u64, 2),
+            2, None, &mut |_,_,_| Ok(()), &mut |_| Ok(())
+        ).await;
+        server.abort();
+        assert!(result.is_ok(), "dynamic download failed: {:?}", result.err());
+        assert!(requests.load(Ordering::SeqCst) > 2, "idle worker never split the slow range");
+        let bytes = fs::read(&target).await.unwrap();
+        assert_eq!(bytes.len(), body_len);
+        assert!(bytes.iter().enumerate().all(|(i, byte)| *byte == (i % 251) as u8));
+    }
+
+    #[tokio::test]
     async fn retried_segments_publish_live_bytes_and_merge_without_duplicates() {
         let dir = TestDir::new();
         let target = dir.target();
@@ -2911,6 +3099,7 @@ mod segment_tests {
                 &url,
                 &target,
                 manifest,
+                2,
                 None,
                 &mut |_started, _total, _count| Ok(()),
                 &mut |progress| {
@@ -3302,6 +3491,7 @@ mod transfer_feature_tests {
                 &url,
                 &target,
                 build_segment_manifest(1000),
+                2,
                 None,
                 &mut |_, _, _| Ok(()),
                 &mut |_| Ok(()),
@@ -3373,7 +3563,7 @@ mod transfer_feature_tests {
         }
         let root = std::env::temp_dir().join(format!("ldm-media-{}", std::process::id()));
         fs::create_dir_all(&root).await.unwrap();
-        for container in ["mp3", "m4a", "mkv", "webm", "mp4"] {
+        for container in ["mp3", "m4a", "mkv", "mov", "webm", "mp4"] {
             let path = root.join(format!("sample.{container}"));
             let mut command = Command::new("ffmpeg");
             command.args([

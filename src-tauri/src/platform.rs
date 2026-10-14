@@ -2,6 +2,37 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::io::Write;
+
+const EXTENSION_FILES: [&str; 9] = [
+    "manifest.json", "service-worker.js", "player-manifest-observer.js",
+    "youtube-audio-observer.js", "content-script.js", "content-style.css",
+    "popup.html", "popup.js", "popup.css",
+];
+
+pub fn package_firefox_extension(
+    firefox_dir: impl AsRef<Path>,
+    output_zip: impl AsRef<Path>,
+) -> Result<(), String> {
+    let source_dir = firefox_dir.as_ref();
+    let destination = output_zip.as_ref();
+    let parent = destination.parent().ok_or("Firefox ZIP needs a parent directory")?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temporary = destination.with_extension("zip.tmp");
+    let file = fs::File::create(&temporary).map_err(|error| error.to_string())?;
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored);
+    for name in EXTENSION_FILES {
+        let contents = fs::read(source_dir.join(name))
+            .map_err(|error| format!("{}: {error}", source_dir.join(name).display()))?;
+        archive.start_file(name, options).map_err(|error| error.to_string())?;
+        archive.write_all(&contents).map_err(|error| error.to_string())?;
+    }
+    archive.finish().map_err(|error| error.to_string())?;
+    fs::rename(&temporary, destination).map_err(|error| error.to_string())?;
+    Ok(())
+}
 
 pub fn resolve_app_data_dir() -> Result<PathBuf, String> {
     if let Ok(value) = env::var("XDG_DATA_HOME") {
@@ -99,6 +130,7 @@ pub fn run_first_time_setup() {
     };
 
     install_browser_extension(exe_dir, &app_data, &home);
+    install_firefox_native_host(&home, &installed_native_host);
     if !needs_setup {
         return;
     }
@@ -141,6 +173,23 @@ pub fn run_first_time_setup() {
         &setup_marker,
         installed_native_host.to_string_lossy().as_ref(),
     );
+}
+
+fn install_firefox_native_host(home: &str, native_host: &Path) {
+    if !Path::new(&format!("{home}/.mozilla")).exists()
+        && !Command::new("which").arg("firefox").output().is_ok_and(|o| o.status.success()) {
+        return;
+    }
+    let firefox_dir = PathBuf::from(home).join(".mozilla/native-messaging-hosts");
+    let _ = fs::create_dir_all(&firefox_dir);
+    let manifest = serde_json::json!({
+        "name": "com.eko.linuxdownloadmanager",
+        "description": "Native messaging bridge for Linux Download Manager",
+        "path": native_host.to_string_lossy(),
+        "type": "stdio",
+        "allowed_extensions": ["ldm-bridge@ekremx25.github.io"]
+    });
+    let _ = fs::write(firefox_dir.join("com.eko.linuxdownloadmanager.json"), manifest.to_string());
 }
 
 fn detect_extension_id(home: &str) -> String {
@@ -209,22 +258,27 @@ fn install_browser_extension(exe_dir: &Path, app_data: &Path, home: &str) {
 
     let _ = fs::create_dir_all(&ext_dest);
 
-    let files = [
-        "manifest.json",
-        "service-worker.js",
-        "player-manifest-observer.js",
-        "youtube-audio-observer.js",
-        "content-script.js",
-        "content-style.css",
-        "popup.html",
-        "popup.js",
-        "popup.css",
-    ];
-    for file in &files {
+    for file in &EXTENSION_FILES {
         let src = source_dir.join(file);
         let dst = ext_dest.join(file);
         if src.exists() {
             let _ = fs::copy(&src, &dst);
+        }
+    }
+
+    let firefox_manifest_source = source_dir.parent().map(|browser_dir| browser_dir.join("firefox/manifest.json"));
+    if let Some(manifest_source) = firefox_manifest_source.filter(|path| path.exists()) {
+        let firefox_dest = PathBuf::from(home).join("Documents/Linux Download Manager Firefox Extension");
+        let _ = fs::create_dir_all(&firefox_dest);
+        let _ = fs::copy(manifest_source, firefox_dest.join("manifest.json"));
+        for file in &EXTENSION_FILES {
+            if *file != "manifest.json" {
+                let _ = fs::copy(source_dir.join(file), firefox_dest.join(file));
+            }
+        }
+        let output_zip = PathBuf::from(home).join("Documents/Linux Download Manager Firefox Extension.zip");
+        if let Err(error) = package_firefox_extension(&firefox_dest, output_zip) {
+            eprintln!("WARNING: could not package Firefox extension: {error}");
         }
     }
 
@@ -275,7 +329,12 @@ fn install_browser_extension(exe_dir: &Path, app_data: &Path, home: &str) {
         \"Developer mode\" in the top right corner\n\n\
         2. Click \"Load unpacked\"\n\n\
         3. Select this folder:\n   {}\n\n\
-        (This folder lives under Documents; do not delete it, the app depends on it.)",
+        Firefox test: about:debugging → This Firefox → Load Temporary Add-on, then select:
+        {home}/Documents/Linux Download Manager Firefox Extension.zip
+
+        Firefox requires a Mozilla-signed add-on for a permanent installation.
+
+        (These folders live under Documents; do not delete them, the app depends on them.)",
         ext_dest.display()
     );
 

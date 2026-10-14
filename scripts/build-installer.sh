@@ -16,7 +16,7 @@ mkdir -p dist
 stage="$(mktemp -d)"
 trap 'rm -rf -- "$stage"' EXIT
 package="$stage/$name"
-mkdir -p "$package/bin" "$package/browser/chromium" "$package/src-tauri/icons"
+mkdir -p "$package/bin" "$package/browser/chromium" "$package/browser/firefox" "$package/src-tauri/icons"
 for binary in linux-download-manager-custom browser_native_host; do
   install -m 0755 "${CARGO_TARGET_DIR:-$root/target}/release/$binary" "$package/bin/$binary"
 done
@@ -24,6 +24,7 @@ install -m 0755 install.sh uninstall.sh "$package/"
 for file in manifest.json service-worker.js player-manifest-observer.js youtube-audio-observer.js content-script.js content-style.css popup.html popup.js popup.css; do
   install -m 0644 "browser/chromium/$file" "$package/browser/chromium/$file"
 done
+install -m 0644 browser/firefox/manifest.json "$package/browser/firefox/manifest.json"
 install -m 0644 src-tauri/icons/icon.png "$package/src-tauri/icons/icon.png"
 cat > "$package/Install.desktop" <<'DESKTOP'
 [Desktop Entry]
@@ -77,6 +78,11 @@ Linux Download Manager
 4. In your browser's Extensions page, enable Developer mode > Load unpacked:
    ~/Documents/Linux Download Manager Extension
    After updating, reload the extension and refresh the video page.
+5. Firefox test: about:debugging > This Firefox > Load Temporary Add-on, then select:
+   ~/Documents/Linux Download Manager Firefox Extension.zip
+   Normal Firefox needs a Mozilla-signed add-on for permanent installation.
+6. Chrome stays in its unpacked folder; Firefox has one ZIP in ~/Documents/.
+   Visual instructions: https://github.com/ekremx25/linux-download-manager/blob/main/docs/extension-install-tr.md
 
 This prebuilt package is for x86_64 Linux. No Rust compiler is required.
 GTK3, WebKitGTK 4.1 and compatible system libraries are required. Binaries built
