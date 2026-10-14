@@ -58,6 +58,43 @@ const STREAM_MANIFEST_CONTENT_TYPES: &[&str] = &[
     "application/dash+xml",
 ];
 
+fn hidden_work_dir(target: &Path, kind: &str) -> PathBuf {
+    let digest = format!("{:x}", Sha256::digest(target.as_os_str().as_encoded_bytes()));
+    target
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".ldm-{kind}-{}", &digest[..20]))
+}
+
+fn legacy_ytdlp_sidecar(name: &str, target_name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(target_name) else {
+        return false;
+    };
+    suffix == ".part"
+        || suffix == ".ytdl"
+        || suffix.strip_prefix(".part-Frag").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        || (suffix.starts_with(".f") && (suffix.ends_with(".part") || suffix.ends_with(".ytdl") || suffix.contains(".part-Frag")))
+}
+
+async fn legacy_ytdlp_sidecars(target: &Path) -> Result<Vec<PathBuf>, String> {
+    let Some(parent) = target.parent() else { return Ok(Vec::new()); };
+    let Some(target_name) = target.file_name().and_then(|name| name.to_str()) else { return Ok(Vec::new()); };
+    let mut entries = match fs::read_dir(parent).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut sidecars = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|error| error.to_string())? {
+        if legacy_ytdlp_sidecar(&entry.file_name().to_string_lossy(), target_name)
+            && entry.file_type().await.map_err(|error| error.to_string())?.is_file()
+        {
+            sidecars.push(entry.path());
+        }
+    }
+    Ok(sidecars)
+}
+
 struct KillOnDropChild {
     child: Option<Child>,
 }
@@ -1164,8 +1201,18 @@ impl DownloadService {
             cmd.arg("--cookies-from-browser")
                 .arg(detect_browser_for_cookies());
         }
+        // Keep yt-dlp's .part-Frag and .ytdl sidecars out of the user's video
+        // directory. Existing sidecars stay at their old path so resume works.
+        let legacy_sidecars = legacy_ytdlp_sidecars(target_path).await?;
+        let workspace = hidden_work_dir(target_path, "ytdlp");
+        let output_path = if legacy_sidecars.is_empty() {
+            fs::create_dir_all(&workspace).await.map_err(|e| e.to_string())?;
+            workspace.join(target_path.file_name().ok_or("download filename is missing")?)
+        } else {
+            target_path.to_path_buf()
+        };
         cmd.arg("-o")
-            .arg(target_path)
+            .arg(&output_path)
             .arg("--print")
             .arg("after_move:LDM_FILE:%(filepath)j")
             .arg("--newline")
@@ -1196,6 +1243,14 @@ impl DownloadService {
             fs::rename(&actual_path, target_path)
                 .await
                 .map_err(|error| format!("failed to finalize yt-dlp output: {error}"))?;
+        }
+
+        if legacy_sidecars.is_empty() {
+            let _ = fs::remove_dir_all(&workspace).await;
+        } else {
+            for sidecar in legacy_sidecars {
+                let _ = fs::remove_file(sidecar).await;
+            }
         }
 
         let downloaded_bytes = fs::metadata(target_path)
@@ -1233,6 +1288,23 @@ impl DownloadService {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("Could not remove HLS cache: {e}")),
+        }
+        let legacy_cache = hls::legacy_cache_path(target_path);
+        if legacy_cache != cache {
+            match fs::remove_dir_all(&legacy_cache).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("Could not remove HLS cache: {e}")),
+            }
+        }
+        let workspace = hidden_work_dir(target_path, "ytdlp");
+        match fs::remove_dir_all(&workspace).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Could not remove yt-dlp work directory: {e}")),
+        }
+        for sidecar in legacy_ytdlp_sidecars(target_path).await? {
+            remove_file(&sidecar).await?;
         }
         // yt-dlp names split video/audio files "<stem>.f<format>.<ext>".
         if let (Some(parent), Some(name), Some(stem)) = (
@@ -2857,6 +2929,16 @@ mod segment_tests {
         fs::write(service.partial_path_for(&target), b"partial")
             .await
             .unwrap();
+        let name = target.file_name().unwrap().to_string_lossy();
+        let fragment = target.with_file_name(format!("{name}.part-Frag73"));
+        let ytdl = target.with_file_name(format!("{name}.ytdl"));
+        let other_fragment = target.with_file_name(format!("{name} (1).part-Frag73"));
+        fs::write(&fragment, b"fragment").await.unwrap();
+        fs::write(&ytdl, b"state").await.unwrap();
+        fs::write(&other_fragment, b"keep").await.unwrap();
+        let workspace = hidden_work_dir(&target, "ytdlp");
+        fs::create_dir_all(&workspace).await.unwrap();
+        fs::write(workspace.join("fragment"), b"fragment").await.unwrap();
         let cache = hls::cache_path(&target);
         fs::create_dir_all(&cache).await.unwrap();
         fs::write(cache.join("segment-0.ts"), b"cached")
@@ -2866,6 +2948,10 @@ mod segment_tests {
         assert!(!target.exists());
         assert!(!cache.exists());
         assert!(!service.partial_path_for(&target).exists());
+        assert!(!workspace.exists());
+        assert!(!fragment.exists());
+        assert!(!ytdl.exists());
+        assert_eq!(fs::read(other_fragment).await.unwrap(), b"keep");
         assert_eq!(fs::read(neighbor).await.unwrap(), b"keep");
         service.delete_download_files(&target).await.unwrap(); // missing files are safe
         fs::create_dir(&target).await.unwrap();
@@ -3417,6 +3503,7 @@ mod live_progress_tests {
         result.unwrap().unwrap();
         assert!(live_samples >= 2, "missing live speed/ETA: {live_samples}");
         assert_eq!(std::fs::read(&target).unwrap(), vec![7u8; 2097152]);
+        assert!(!hidden_work_dir(&target, "ytdlp").exists());
         std::fs::remove_file(target).unwrap();
     }
 }

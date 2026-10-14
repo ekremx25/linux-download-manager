@@ -53,6 +53,14 @@ pub(super) struct Prepared {
     cache: PathBuf,
 }
 pub(super) fn cache_path(target: &Path) -> PathBuf {
+    let legacy = legacy_cache_path(target);
+    if legacy.exists() {
+        return legacy;
+    }
+    hidden_work_dir(target, "hls")
+}
+
+pub(super) fn legacy_cache_path(target: &Path) -> PathBuf {
     let mut name = target.file_name().unwrap_or_default().to_os_string();
     name.push(".hls-cache");
     target.with_file_name(name)
