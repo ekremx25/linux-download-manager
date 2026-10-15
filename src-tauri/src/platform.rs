@@ -113,13 +113,24 @@ pub fn run_first_time_setup() {
 
     let bin_dir = app_data.join("bin");
     let _ = fs::create_dir_all(&bin_dir);
-    let installed_native_host = bin_dir.join("browser_native_host");
-    let _ = fs::copy(&source_native_host, &installed_native_host);
+    // System packages keep the host beside the app so browser launches resolve
+    // the package-managed executable, rather than a stale user installation.
+    let system_package = exe_dir == Path::new("/usr/lib/linux-download-manager");
+    let installed_native_host = if system_package {
+        source_native_host.clone()
+    } else {
+        bin_dir.join("browser_native_host")
+    };
+    if !system_package {
+        let _ = fs::copy(&source_native_host, &installed_native_host);
+    }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&installed_native_host, fs::Permissions::from_mode(0o755));
+        if !system_package {
+            let _ = fs::set_permissions(&installed_native_host, fs::Permissions::from_mode(0o755));
+        }
     }
 
     let needs_setup = if setup_marker.exists() {
@@ -131,7 +142,7 @@ pub fn run_first_time_setup() {
 
     install_browser_extension(exe_dir, &app_data, &home);
     install_firefox_native_host(&home, &installed_native_host);
-    if !needs_setup {
+    if !needs_setup && !system_package {
         return;
     }
 
@@ -165,7 +176,11 @@ pub fn run_first_time_setup() {
         }
     }
 
-    install_ytdlp(&home);
+    if system_package {
+        configure_ytdlp_js_runtime(&home);
+    } else {
+        install_ytdlp(&home);
+    }
     install_browser_extension(exe_dir, &app_data, &home);
 
     let _ = fs::create_dir_all(&app_data);

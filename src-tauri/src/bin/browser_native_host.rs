@@ -136,6 +136,13 @@ fn ensure_desktop_app_running() -> Result<(), String> {
 }
 
 fn desktop_binary_path() -> Result<PathBuf, String> {
+    // A package-managed bridge must never select a previously saved AppImage.
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    if executable.parent() == Some(std::path::Path::new("/usr/lib/linux-download-manager")) {
+        let app = executable.with_file_name("linux-download-manager-custom");
+        return app.is_file().then_some(app)
+            .ok_or_else(|| "Package-managed LDM executable is missing; reinstall the package".into());
+    }
     if let Ok(data) = std::env::var("XDG_DATA_HOME").map(PathBuf::from).or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".local/share"))).map(|p| p.join("linux-download-manager-custom")) {
         if let Ok(saved) = std::fs::read_to_string(data.join(".appimage_path")) {
             let path = PathBuf::from(saved);

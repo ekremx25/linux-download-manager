@@ -38,6 +38,13 @@ Release packages are built on Ubuntu 22.04. The AppImage targets Ubuntu 22.04+ a
 
 **Browser integration:** installing or launching LDM prepares the extension files. Complete the one-time browser steps below to activate them.
 
+### Arch Linux / CachyOS package
+
+An AUR-style source package is available in [`packaging/aur`](packaging/aur/README.md).
+It uses pacman-managed dependencies and installs to `/usr`. See that guide for
+local installation and publication status; a recipe in this repository alone
+does not make the package available through `yay`.
+
 ### Build from source
 
 ```bash
@@ -212,3 +219,7 @@ The GitHub Actions **Build Linux packages** workflow builds the AppImage and ins
 | `docs/` | Visual installation instructions and screenshots |
 
 Built with [Tauri](https://tauri.app/), [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [FFmpeg](https://ffmpeg.org/).
+
+## License
+
+MIT — see [LICENSE](LICENSE).

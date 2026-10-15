@@ -1,0 +1,61 @@
+# Maintainer: ekremx25 <ekremx25@users.noreply.github.com>
+pkgname=linux-download-manager-git
+pkgver=0.2.5.r26.g147d255
+pkgrel=1
+pkgdesc='Desktop download manager with parallel transfers and browser video capture'
+arch=('x86_64')
+url='https://github.com/ekremx25/linux-download-manager'
+license=('MIT')
+depends=('glibc' 'gcc-libs' 'glib2' 'gtk3' 'webkit2gtk-4.1' 'libsoup3'
+         'libappindicator' 'openssl' 'ffmpeg' 'yt-dlp' 'nodejs' 'xdg-utils' 'which')
+makedepends=('git' 'rust' 'pkgconf' 'clang' 'cmake')
+optdepends=('zenity: browser extension setup dialog'
+            'chromium: browser integration' 'firefox: Firefox integration')
+provides=('linux-download-manager')
+conflicts=('linux-download-manager' 'linux-download-manager-bin')
+source=('linux-download-manager::git+https://github.com/ekremx25/linux-download-manager.git#branch=main'
+        'linux-download-manager.desktop')
+sha256sums=('SKIP' '7343b42292169a159409f7d3747cd736bc6ea651040d216b80f159cfa2896478')
+options=('!lto')
+
+pkgver() {
+  cd "$srcdir/linux-download-manager"
+  local version
+  version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' src-tauri/Cargo.toml | head -n1)
+  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "$srcdir/linux-download-manager"
+  export CARGO_HOME="$srcdir/cargo-home"
+  cargo fetch --locked
+}
+
+build() {
+  cd "$srcdir/linux-download-manager"
+  export CARGO_HOME="$srcdir/cargo-home"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --release --frozen --bins
+}
+
+package() {
+  cd "$srcdir/linux-download-manager"
+  local libdir="$pkgdir/usr/lib/linux-download-manager"
+  install -Dm755 "$srcdir/target/release/linux-download-manager-custom" "$libdir/linux-download-manager-custom"
+  install -Dm755 "$srcdir/target/release/browser_native_host" "$libdir/browser_native_host"
+  install -dm755 "$pkgdir/usr/bin"
+  ln -s /usr/lib/linux-download-manager/linux-download-manager-custom "$pkgdir/usr/bin/linux-download-manager"
+  install -Dm644 "$srcdir/linux-download-manager.desktop" "$pkgdir/usr/share/applications/linux-download-manager.desktop"
+  local size
+  for size in 32 64 128 256 512; do
+    install -Dm644 "src-tauri/icons/${size}x${size}.png" "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/linux-download-manager.png"
+  done
+  install -dm755 "$pkgdir/usr/share/linux-download-manager/browser"
+  cp -r browser/chromium browser/firefox "$pkgdir/usr/share/linux-download-manager/browser/"
+  install -dm755 "$libdir/_up_"
+  ln -s /usr/share/linux-download-manager/browser "$libdir/_up_/browser"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  if [[ -f LICENSE ]]; then
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  fi
+}

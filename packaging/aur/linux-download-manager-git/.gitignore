@@ -1,0 +1,5 @@
+/src/
+/pkg/
+/linux-download-manager/
+/*.pkg.tar.*
+/*.src.tar.*
