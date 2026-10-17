@@ -66,7 +66,7 @@ Run as your normal user. The installer requests `sudo` for system dependencies a
 ## Unreleased fixes
 
 - Cache supported separate HLS video and audio tracks before merging: video uses
-  parallel transfers, while audio uses one worker to reduce rate limiting. Audio
+  parallel transfers, while audio uses up to four workers and slows down on rate limits. Audio
   failures preserve cached fragments for retry. Unsupported manifests still use
   FFmpeg. Segment filenames no longer cause audio fragments to be discarded.
 - Direct HLS transfers no longer run a separate yt-dlp download first. Progress

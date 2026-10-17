@@ -400,14 +400,16 @@ pub(super) async fn prepare_parallel(
         client, url, headers, referer, &base, &text, &cache, parallel, &mut video_progress,
     ).await? else { return Ok(None); };
     let audio_playlist = if let Some((base, text)) = audio_media {
+        let audio_parallel = parallel.min(RATE_LIMIT_SOFT_CAP);
         let mut audio_progress = |p: DownloadProgress| {
             progress(DownloadProgress::bytes(video_bytes + p.downloaded_bytes,
-                p.total_bytes.map(|n| video_bytes + n), 1))
+                p.total_bytes.map(|n| video_bytes + n), audio_parallel))
         };
-        // Audio is small and often rate limited independently. Cache it with
-        // one worker; retries reuse completed video and audio segments.
+        // Audio has many small fragments: bounded parallelism avoids paying
+        // one network round trip per fragment. Existing 429 handling reduces
+        // concurrency to one when needed; retries retain completed fragments.
         let Some((playlist, _, _)) = prefetch_playlist(
-            client, url, headers, referer, &base, &text, &cache, 1, &mut audio_progress,
+            client, url, headers, referer, &base, &text, &cache, audio_parallel, &mut audio_progress,
         ).await? else {
             return Err("Audio download failed. Video fragments are saved; Resume / retry will reuse them.".into());
         };
