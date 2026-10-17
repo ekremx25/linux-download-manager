@@ -52,6 +52,19 @@ async fn acquire_request(active: &Arc<AtomicUsize>, live: &AtomicUsize) -> Activ
     }
 }
 
+/// Successful network transfers (not cache hits) gradually remove pacing.
+fn recovered_spacing(ms: u64) -> u64 {
+    if ms <= 50 { 0 } else { ms / 2 }
+}
+
+/// Coalesce a burst of simultaneous 429s into one penalty while extending the
+/// shared deadline to honor every response's Retry-After value.
+fn extend_cooldown(deadline: &mut Instant, now: Instant, delay: Duration) -> bool {
+    let new_window = *deadline <= now;
+    if let Some(next) = now.checked_add(delay) { *deadline = (*deadline).max(next); }
+    new_window
+}
+
 /// Concurrency ceiling the prefetch drops to on the first rate-limit response.
 const RATE_LIMIT_SOFT_CAP: usize = 4;
 /// Successful segments needed before the prefetch widens again.
@@ -555,40 +568,41 @@ async fn prefetch_playlist(
                         if streak.fetch_add(1, Ordering::Relaxed) + 1 >= CONCURRENCY_RECOVERY_STREAK
                         {
                             streak.store(0, Ordering::Relaxed);
-                            let current = live.load(Ordering::Relaxed);
-                            let raised = next_concurrency(current, parallel, false);
-                            if raised > current && spacing_ms.load(Ordering::Relaxed) == 0 {
-                                live.store(raised, Ordering::Relaxed);
+                            let spacing = spacing_ms.load(Ordering::Relaxed);
+                            if spacing > 0 {
+                                // Compare-and-swap avoids overwriting a concurrent 429 penalty.
+                                let _ = spacing_ms.compare_exchange(spacing, recovered_spacing(spacing),
+                                    Ordering::Relaxed, Ordering::Relaxed);
+                            } else {
+                                let current = live.load(Ordering::Relaxed);
+                                let raised = next_concurrency(current, parallel, false);
+                                let _ = live.compare_exchange(current, raised, Ordering::Relaxed, Ordering::Relaxed);
                             }
                         }
                         return Ok(());
                     }
                     Err(failure) => {
-                        if matches!(failure, SegmentFailure::RateLimited(_)) {
-                            let _ = fs::write(folder.join(".rate-limited"), b"1").await;
-                            let _ = spacing_ms.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
-                                |ms| Some(ms.saturating_mul(2).clamp(250, 2000)));
-                            let current = live.load(Ordering::Relaxed);
-                            let reduced = next_concurrency(current, parallel, true);
-                            if reduced < current {
-                                live.store(reduced, Ordering::Relaxed);
-                            }
-                            streak.store(0, Ordering::Relaxed);
-                        }
                         let Some(delay) = segment_retry_delay(&failure, attempt) else {
                             return Err(match failure {
                                 SegmentFailure::Local(error) => SegmentFailure::Local(format!(
-                                    "HLS segment {}: {error}",
-                                    index + 1
+                                    "HLS segment {}: {error}", index + 1
                                 )),
                                 other => other,
                             });
                         };
                         if matches!(failure, SegmentFailure::RateLimited(_)) {
-                            let mut deadline = cooldown.lock().unwrap();
-                            if let Some(next) = Instant::now().checked_add(delay) {
-                                *deadline = (*deadline).max(next);
+                            let new_window = {
+                                let mut deadline = cooldown.lock().unwrap();
+                                extend_cooldown(&mut deadline, Instant::now(), delay)
+                            };
+                            if new_window {
+                                let _ = fs::write(folder.join(".rate-limited"), b"1").await;
+                                let old = spacing_ms.load(Ordering::Relaxed);
+                                spacing_ms.store(old.saturating_mul(2).clamp(250, 2000), Ordering::Relaxed);
+                                let current = live.load(Ordering::Relaxed);
+                                live.store(next_concurrency(current, parallel, true), Ordering::Relaxed);
                             }
+                            streak.store(0, Ordering::Relaxed);
                         }
                         tokio::time::sleep(delay).await;
                     }
@@ -630,6 +644,18 @@ async fn prefetch_playlist(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pacing_recovers_and_simultaneous_429s_count_once() {
+        let mut spacing = 2000;
+        let mut steps = 0;
+        while spacing != 0 { spacing = recovered_spacing(spacing); steps += 1; assert!(steps < 10); }
+        let now = Instant::now();
+        let mut deadline = now;
+        assert!(extend_cooldown(&mut deadline, now, Duration::from_secs(7)));
+        assert!(!extend_cooldown(&mut deadline, now + Duration::from_secs(1), Duration::from_secs(10)));
+        assert_eq!(deadline, now + Duration::from_secs(11));
+        assert!(extend_cooldown(&mut deadline, now + Duration::from_secs(12), Duration::from_secs(7)));
+    }
     #[test]
     fn server_retry_after_is_honored() {
         assert_eq!(retry_after_delay(Some("7")), Some(Duration::from_secs(7)));
@@ -932,6 +958,26 @@ mod integration_tests {
         prepare(&Client::new(), &fixture.url.join("limited.m3u8").unwrap(),
             &target, &HashMap::new(), None, &mut |_| Ok(())).await.unwrap().unwrap();
         assert_eq!(fixture.requests.load(Ordering::Relaxed), 2);
+        prepared.cleanup().await;
+        let _ = fs::remove_dir_all(target.parent().unwrap()).await;
+    }
+    #[tokio::test]
+    async fn resumed_rate_limited_playlist_recovers_parallel_speed() {
+        let count = 144;
+        let fixture = Fixture::start_count(vec![7; 4096], count);
+        let target = test_target("pacing-recovery");
+        let base = fixture.url.join("media.m3u8").unwrap();
+        let text = format!("#EXTM3U\n#EXT-X-ALLOW-CACHE:YES\n#EXT-X-TARGETDURATION:1\n{}#EXT-X-ENDLIST\n",
+            (0..count).map(|i| format!("#EXTINF:1,\nsegment-{i}.ts\n")).collect::<String>());
+        let fingerprint = format!("{:x}", Sha256::digest(format!("all-segments-v2\n{base}\n{text}")));
+        let folder = cache_path(&target).join(fingerprint);
+        fs::create_dir_all(&folder).await.unwrap();
+        fs::write(folder.join(".rate-limited"), b"1").await.unwrap();
+        let started = Instant::now();
+        let prepared = prepare(&Client::new(), &fixture.url, &target, &HashMap::new(), None, &mut |_| Ok(())).await.unwrap().unwrap();
+        println!("Recovery benchmark: {} segments in {:?}; peak {} connections; previous fixed 250ms pacing alone required >= {:.2}s", count, started.elapsed(), fixture.peak.load(Ordering::Relaxed), (count-1) as f64 * 0.25);
+        assert!(fixture.peak.load(Ordering::Relaxed) > 1, "a past limit must not permanently pin concurrency to one");
+        assert_eq!(fixture.requests.load(Ordering::Relaxed), count);
         prepared.cleanup().await;
         let _ = fs::remove_dir_all(target.parent().unwrap()).await;
     }

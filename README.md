@@ -65,6 +65,11 @@ Run as your normal user. The installer requests `sudo` for system dependencies a
 
 ## Unreleased fixes
 
+- Recover HLS speed after temporary rate limits: successful requests gradually
+  reduce pacing and restore concurrency. Simultaneous 429 responses share one
+  slowdown penalty while every Retry-After deadline is honored. Server-side
+  limits can still restrict throughput.
+
 - Cache supported separate HLS video and audio tracks before merging: video uses
   parallel transfers, while audio uses up to four workers and slows down on rate limits. Audio
   failures preserve cached fragments for retry. Unsupported manifests still use
