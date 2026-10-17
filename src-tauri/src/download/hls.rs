@@ -6,6 +6,11 @@ use std::sync::atomic::AtomicUsize;
 mod dns_fallback;
 
 const PLAYLIST_LIMIT: usize = 2 * 1024 * 1024;
+/// Separate audio renditions often sit on a CDN that allows a short burst and then
+/// answers 429 to anything faster than about three requests per second.
+const AUDIO_REQUEST_INTERVAL: Duration = Duration::from_millis(340);
+/// Audio requests are paced, so a few connections are enough to hide latency.
+const AUDIO_PARALLEL: usize = 4;
 
 #[derive(Debug, PartialEq)]
 enum SegmentFailure {
@@ -52,6 +57,8 @@ pub(super) struct Prepared {
     pub playlist: PathBuf,
     /// Prefetched audio rendition when the master publishes video and audio apart.
     pub audio_playlist: Option<PathBuf>,
+    /// The same rendition for FFmpeg to read remotely when its prefetch failed.
+    pub audio_url: Option<Url>,
     cache: PathBuf,
 }
 pub(super) fn cache_path(target: &Path) -> PathBuf {
@@ -75,6 +82,10 @@ impl Prepared {
 }
 
 fn parse(text: &str, base: &Url) -> Option<(String, Vec<Url>)> {
+    parse_track(text, base, false)
+}
+
+fn parse_track(text: &str, base: &Url, audio: bool) -> Option<(String, Vec<Url>)> {
     if !text.trim_start().starts_with("#EXTM3U")
         || !text.lines().any(|l| l.trim() == "#EXT-X-ENDLIST")
     {
@@ -122,7 +133,7 @@ fn parse(text: &str, base: &Url) -> Option<(String, Vec<Url>)> {
             }
             // Skip f2 (audio) segments — the CDN rate-limits them to 429.
             // FFmpeg handles audio via the separate audio stream URL.
-            if line.contains("-f2-") {
+            if !audio && line.contains("-f2-") {
                 // Write placeholder so the preceding EXTINF is also removed by filter below.
                 local.push_str("#EXTINF:SKIP\n");
                 duration_pending = false;
@@ -274,6 +285,31 @@ pub(super) async fn expected_duration(
     None
 }
 
+/// True when the master publishes a separate audio rendition that the parallel
+/// prefetcher can fetch itself. yt-dlp would fetch such audio with an unpaced
+/// burst, get rate-limited after the full video and leave nothing usable.
+pub(super) async fn prefers_own_prefetch(
+    client: &Client,
+    url: &Url,
+    headers: &HashMap<String, String>,
+    referer: Option<&str>,
+) -> bool {
+    let Some((base, text)) = fetch_playlist(client, url, url, headers, referer).await else {
+        return false;
+    };
+    if master_variant(&text, &base).is_none() {
+        return false;
+    }
+    let Some(audio_url) = master_audio_variant(&text, &base) else {
+        return false;
+    };
+    fetch_playlist(client, &audio_url, url, headers, referer)
+        .await
+        .is_some_and(|(audio_base, audio_text)| {
+            parse_track(&audio_text, &audio_base, true).is_some()
+        })
+}
+
 fn request(
     client: &Client,
     url: &Url,
@@ -340,31 +376,132 @@ pub(super) async fn prepare_parallel(
         let Some(variant) = master_variant(&text, &base) else {
             return Ok(None);
         };
-        audio_url = master_audio_variant(&text, &base);
+        audio_url = master_audio_variant(&text, &base).or(audio_url);
         next = variant;
     }
     let Some((base, text, _, _)) = media else {
         return Ok(None);
     };
     let cache = cache_path(target);
-    let Some((playlist, _, _)) = prefetch_playlist(
-        client, url, headers, referer, &base, &text, &cache, parallel, progress,
+    let Some((playlist, audio_playlist)) = prefetch_tracks(
+        client,
+        url,
+        headers,
+        referer,
+        (&base, &text),
+        audio_url.as_ref(),
+        &cache,
+        parallel,
+        progress,
     )
     .await?
     else {
         return Ok(None);
     };
-    // NOTE: audio streams are left to FFmpeg.  When a CDN limits the audio
-    // playlist (e.g. Rapidrame returns 429 only on audio segments), skipping
-    // parallel prefetch here prevents the audio track from starving the video
-    // track — FFmpeg downloads audio sequentially but the audio track is tiny
-    // (~2 MB) so the slowdown is negligible compared to a full 429 collapse.
-    let audio_playlist = None;
     Ok(Some(Prepared {
         playlist,
         audio_playlist,
+        audio_url,
         cache,
     }))
+}
+
+/// Prefetches the video playlist and, when the master publishes one, its audio
+/// rendition at the same time. Returns None when the video could not be fetched;
+/// a missing audio playlist means FFmpeg has to read the audio remotely.
+#[allow(clippy::too_many_arguments)]
+async fn prefetch_tracks(
+    client: &Client,
+    url: &Url,
+    headers: &HashMap<String, String>,
+    referer: Option<&str>,
+    (base, text): (&Url, &str),
+    audio_url: Option<&Url>,
+    cache: &Path,
+    parallel: usize,
+    progress: &mut impl FnMut(DownloadProgress) -> Result<(), String>,
+) -> Result<Option<(PathBuf, Option<PathBuf>)>, String> {
+    // Both tracks report into one progress bar: [video, audio] (downloaded, estimate, parts).
+    let shared = std::sync::Mutex::new((progress, [(0u64, 0u64, 0usize); 2]));
+    let report = |slot: usize, update: DownloadProgress| {
+        let mut state = shared
+            .lock()
+            .map_err(|_| "HLS progress lock poisoned".to_string())?;
+        state.1[slot] = (
+            update.downloaded_bytes,
+            update.total_bytes.unwrap_or(update.downloaded_bytes),
+            update.active_parts,
+        );
+        let (downloaded, total, parts) = state.1.iter().fold((0, 0, 0), |sum, track| {
+            (sum.0 + track.0, sum.1 + track.1, sum.2 + track.2)
+        });
+        (state.0)(DownloadProgress::bytes(downloaded, Some(total), parts.max(1)))
+    };
+    let mut video_progress = |update| report(0, update);
+    let mut audio_progress = |update| report(1, update);
+    let video = prefetch_playlist(
+        client,
+        url,
+        headers,
+        referer,
+        base,
+        text,
+        cache,
+        parallel,
+        false,
+        &mut video_progress,
+    );
+    // Audio runs beside the video instead of after it: it is paced by the CDN's
+    // rate limit, so starting it late would add its whole duration to the total.
+    let audio = async {
+        let Some(audio_url) = audio_url else {
+            return Ok(None);
+        };
+        let Some((audio_base, audio_text)) =
+            fetch_playlist(client, audio_url, url, headers, referer).await
+        else {
+            return Ok(None);
+        };
+        prefetch_playlist(
+            client,
+            url,
+            headers,
+            referer,
+            &audio_base,
+            &audio_text,
+            cache,
+            parallel.min(AUDIO_PARALLEL),
+            true,
+            &mut audio_progress,
+        )
+        .await
+    };
+    tokio::pin!(video, audio);
+    let mut audio_done = None;
+    let video = loop {
+        tokio::select! {
+            result = &mut video => break result,
+            result = &mut audio, if audio_done.is_none() => audio_done = Some(result),
+        }
+    };
+    // A failed video drops the audio transfer too; its finished segments stay cached.
+    let Some((playlist, _, _)) = video? else {
+        return Ok(None);
+    };
+    let audio = match audio_done {
+        Some(result) => result,
+        None => audio.await,
+    };
+    // A rendition that cannot be prefetched (429 after retries, unsupported tags)
+    // is still read by FFmpeg remotely; dropping it would leave the video silent.
+    Ok(Some((playlist, audio?.map(|(playlist, _, _)| playlist))))
+}
+
+/// Spaces requests out so a rate-limited CDN never sees a burst.
+async fn pace(next: &tokio::sync::Mutex<tokio::time::Instant>, interval: Duration) {
+    let mut next = next.lock().await;
+    tokio::time::sleep_until(*next).await;
+    *next = tokio::time::Instant::now().max(*next) + interval;
 }
 
 /// Downloads every segment of one media playlist in parallel and writes the local
@@ -380,11 +517,13 @@ async fn prefetch_playlist(
     text: &str,
     cache: &Path,
     parallel: usize,
+    audio: bool,
     progress: &mut impl FnMut(DownloadProgress) -> Result<(), String>,
 ) -> Result<Option<(PathBuf, u64, usize)>, String> {
-    let Some((local, urls)) = parse(text, base) else {
+    let Some((local, urls)) = parse_track(text, base, audio) else {
         return Ok(None);
     };
+    let pacer = audio.then(|| tokio::sync::Mutex::new(tokio::time::Instant::now()));
     // Completed segments are reusable only for the exact same playlist and URL.
     let fingerprint = format!("{:x}", Sha256::digest(format!("{base}\n{text}")));
     let folder = cache.join(fingerprint);
@@ -402,6 +541,7 @@ async fn prefetch_playlist(
     let dns = dns_fallback::Fallback::default();
     let jobs = futures_util::stream::iter(urls.into_iter().enumerate().map(|(index, url)| {
         let dns = &dns;
+        let pacer = pacer.as_ref();
         let folder = folder.clone();
         let bytes = bytes.clone();
         let credential_origin = credential_origin.clone();
@@ -417,6 +557,9 @@ async fn prefetch_playlist(
             let _permit = slots.clone().acquire_owned().await.ok();
             let part = folder.join(format!("segment-{index}.tmp"));
             for attempt in 0..3 {
+                if let Some(pacer) = pacer {
+                    pace(pacer, AUDIO_REQUEST_INTERVAL).await;
+                }
                 let result = async {
                     let response = dns.send(client, &url, &credential_origin, headers, referer)
                         .await
@@ -572,6 +715,28 @@ mod tests {
     }
 
     #[test]
+    fn audio_named_segments_survive_only_in_audio_playlists() {
+        let url = Url::parse("https://example.com/hls/list").unwrap();
+        let text = "#EXTM3U\n#EXTINF:6,\nseg-1-f2-a1.ts\n#EXTINF:6,\nseg-2-f2-a1.ts\n#EXT-X-ENDLIST\n";
+        assert!(parse(text, &url).is_none());
+        let (local, urls) = parse_track(text, &url, true).unwrap();
+        assert_eq!(urls.len(), 2);
+        assert_eq!(local.matches("#EXTINF").count(), 2);
+    }
+
+    #[tokio::test]
+    async fn paced_requests_are_spaced_by_the_interval() {
+        let next = tokio::sync::Mutex::new(tokio::time::Instant::now());
+        let interval = Duration::from_millis(40);
+        let start = tokio::time::Instant::now();
+        for _ in 0..4 {
+            pace(&next, interval).await;
+        }
+        // The first request goes at once, the next three wait one interval each.
+        assert!(start.elapsed() >= interval * 3);
+    }
+
+    #[test]
     fn rate_limited_segments_wait_and_retry_before_giving_up() {
         // A 429 is transient: it must survive the first attempts instead of
         // collapsing the whole parallel prefetch into the sequential fallback.
@@ -703,6 +868,10 @@ mod integration_tests {
                         let header = String::from_utf8_lossy(&input[..n]);
                         let body = if header.starts_with("GET /unreachable.m3u8 ") {
                             b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nhttp://127.0.0.1:0/unreachable.ts\n#EXT-X-ENDLIST\n".to_vec()
+                        } else if header.starts_with("GET /audio-master.m3u8 ") {
+                            b"#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",DEFAULT=YES,URI=\"audio.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"aud\"\nmedia.m3u8\n".to_vec()
+                        } else if header.starts_with("GET /audio.m3u8 ") {
+                            b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\naud-f2-0.ts\n#EXTINF:1,\naud-f2-1.ts\n#EXTINF:1,\naud-f2-2.ts\n#EXTINF:1,\naud-f2-3.ts\n#EXT-X-ENDLIST\n".to_vec()
                         } else if header.starts_with("GET /playlist.m3u8 ") {
                             b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nmedia.m3u8\n".to_vec()
                         } else if header.starts_with("GET /media.m3u8 ") {
@@ -775,6 +944,37 @@ mod integration_tests {
         .unwrap();
         assert_eq!(fixture.peak.load(Ordering::Relaxed), 10);
         assert_eq!(fixture.requests.load(Ordering::Relaxed), 20);
+        prepared.cleanup().await;
+        let _ = fs::remove_dir_all(target.parent().unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn separate_audio_rendition_reaches_ffmpeg() {
+        let fixture = Fixture::start(vec![7; 128]);
+        let target = test_target("separate-audio");
+        let master = fixture.url.join("audio-master.m3u8").unwrap();
+        let prepared = prepare(&Client::new(), &master, &target, &HashMap::new(), None, &mut |_| Ok(()))
+            .await
+            .unwrap()
+            .expect("video variant is still prefetched");
+        // Dropping this URL is what produced silent movies.
+        assert_eq!(prepared.audio_url, Some(fixture.url.join("audio.m3u8").unwrap()));
+        // The audio rendition is prefetched too, -f2- segments included.
+        let audio = fs::read_to_string(prepared.audio_playlist.as_ref().unwrap()).await.unwrap();
+        assert_eq!(audio.lines().filter(|l| !l.starts_with('#')).count(), 4);
+        // 8 video segments plus 4 paced audio segments.
+        assert_eq!(fixture.requests.load(Ordering::Relaxed), 12);
+        assert!(
+            prefers_own_prefetch(&Client::new(), &master, &HashMap::new(), None).await,
+            "yt-dlp would burst the audio CDN into 429"
+        );
+        assert!(!prefers_own_prefetch(&Client::new(), &fixture.url, &HashMap::new(), None).await);
+        let plain = prepare(&Client::new(), &fixture.url, &target, &HashMap::new(), None, &mut |_| Ok(()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.audio_url, None);
+        assert_eq!(plain.audio_playlist, None);
         prepared.cleanup().await;
         let _ = fs::remove_dir_all(target.parent().unwrap()).await;
     }
@@ -946,3 +1146,4 @@ mod integration_tests {
         let _ = fs::remove_dir_all(target.parent().unwrap()).await;
     }
 }
+
