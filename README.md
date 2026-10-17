@@ -15,19 +15,19 @@
 
 ## Install
 
-**Current release: v0.2.5 · Linux x86_64**
+**Current release: v0.2.6 · Linux x86_64**
 
 | Package | Download | How to launch |
 | --- | --- | --- |
-| Portable AppImage | [Linux_Download_Manager-0.2.5-x86_64.AppImage](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.5/Linux_Download_Manager-0.2.5-x86_64.AppImage) | Make executable, then open it. |
-| Desktop installer | [LinuxDownloadManager-0.2.5-linux-x86_64.tar.gz](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.5/LinuxDownloadManager-0.2.5-linux-x86_64.tar.gz) | Extract, then run `Install.desktop` or `bash Install.sh`. |
-| Checksums | [SHA256SUMS](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.5/SHA256SUMS) | Run `sha256sum --ignore-missing -c SHA256SUMS` beside your download. |
+| Portable AppImage | [Linux_Download_Manager-0.2.6-x86_64.AppImage](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.6/Linux_Download_Manager-0.2.6-x86_64.AppImage) | Make executable, then open it. |
+| Desktop installer | [LinuxDownloadManager-0.2.6-linux-x86_64.tar.gz](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.6/LinuxDownloadManager-0.2.6-linux-x86_64.tar.gz) | Extract, then run `Install.desktop` or `bash Install.sh`. |
+| Checksums | [SHA256SUMS](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.6/SHA256SUMS) | Run `sha256sum --ignore-missing -c SHA256SUMS` beside your download. |
 
 ### AppImage
 
 ```bash
-chmod +x Linux_Download_Manager-0.2.5-x86_64.AppImage
-./Linux_Download_Manager-0.2.5-x86_64.AppImage
+chmod +x Linux_Download_Manager-0.2.6-x86_64.AppImage
+./Linux_Download_Manager-0.2.6-x86_64.AppImage
 ```
 
 Keep the AppImage in a permanent location, such as `~/Applications`: browser integration and desktop autostart use its path. If FUSE is unavailable, launch with `--appimage-extract-and-run`.
@@ -62,6 +62,18 @@ Run as your normal user. The installer requests `sudo` for system dependencies a
 ![Download details with individual connections and transfer progress](docs/images/download-details.png)
 
 *Screenshots show example transfers. Colors follow your system theme; speeds depend on your network and the source server.*
+
+## What's new in v0.2.6
+
+- **Separate HLS audio is retained.** Video and its separate audio rendition are
+  fetched alongside each other and merged into the output.
+- **Paced audio requests.** Audio fetching is paced to reduce CDN rate-limit
+  failures. If prefetch fails, FFmpeg can read the audio remotely.
+- **Avoid duplicate video downloads.** Masters with separate audio skip the
+  preliminary yt-dlp attempt that could download video before failing on audio.
+
+Source-server limits still apply; this update does not guarantee a particular
+transfer speed on every site.
 
 ## What's new in v0.2.5
 
