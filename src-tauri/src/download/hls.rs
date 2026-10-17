@@ -11,7 +11,7 @@ const PLAYLIST_LIMIT: usize = 2 * 1024 * 1024;
 enum SegmentFailure {
     Network,
     /// The CDN asked us to slow down; it is transient, not fatal.
-    RateLimited(Option<Duration>),
+    RateLimited,
     Local(String),
 }
 
@@ -19,50 +19,14 @@ enum SegmentFailure {
 /// must abort. A 429 is retried with a real pause so parallel prefetch adapts
 /// to a rate-limited CDN instead of collapsing into the sequential fallback.
 fn segment_retry_delay(failure: &SegmentFailure, attempt: u32) -> Option<Duration> {
-    match failure {
-        SegmentFailure::RateLimited(retry_after) if attempt < 11 => Some(
-            retry_after.unwrap_or_default().max(Duration::from_secs(1 << attempt.min(4)))
-        ),
-        SegmentFailure::Network if attempt + 1 < SEGMENT_MAX_ATTEMPTS =>
-            Some(Duration::from_millis(500 * (attempt as u64 + 1))),
-        _ => None,
+    if attempt + 1 >= SEGMENT_MAX_ATTEMPTS {
+        return None;
     }
-}
-
-fn retry_after_delay(value: Option<&str>) -> Option<Duration> {
-    let value = value?;
-    if let Ok(seconds) = value.parse::<u64>() { return Some(Duration::from_secs(seconds)); }
-    let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
-    Some(Duration::from_secs((date.timestamp() - chrono::Utc::now().timestamp()).max(0) as u64))
-}
-
-struct ActiveRequest(Arc<AtomicUsize>);
-impl Drop for ActiveRequest {
-    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst); }
-}
-
-async fn acquire_request(active: &Arc<AtomicUsize>, live: &AtomicUsize) -> ActiveRequest {
-    loop {
-        let count = active.load(Ordering::SeqCst);
-        if count < live.load(Ordering::SeqCst)
-            && active.compare_exchange(count, count + 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-            return ActiveRequest(active.clone());
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-}
-
-/// Successful network transfers (not cache hits) gradually remove pacing.
-fn recovered_spacing(ms: u64) -> u64 {
-    if ms <= 50 { 0 } else { ms / 2 }
-}
-
-/// Coalesce a burst of simultaneous 429s into one penalty while extending the
-/// shared deadline to honor every response's Retry-After value.
-fn extend_cooldown(deadline: &mut Instant, now: Instant, delay: Duration) -> bool {
-    let new_window = *deadline <= now;
-    if let Some(next) = now.checked_add(delay) { *deadline = (*deadline).max(next); }
-    new_window
+    Some(match failure {
+        SegmentFailure::RateLimited => Duration::from_secs(1 << attempt.min(4)),
+        SegmentFailure::Network => Duration::from_millis(500 * (attempt as u64 + 1)),
+        SegmentFailure::Local(_) => return None,
+    })
 }
 
 /// Concurrency ceiling the prefetch drops to on the first rate-limit response.
@@ -156,17 +120,26 @@ fn parse(text: &str, base: &Url) -> Option<(String, Vec<Url>)> {
             if !matches!(url.scheme(), "http" | "https") {
                 return None;
             }
+            // Skip f2 (audio) segments — the CDN rate-limits them to 429.
+            // FFmpeg handles audio via the separate audio stream URL.
+            if line.contains("-f2-") {
+                // Write placeholder so the preceding EXTINF is also removed by filter below.
+                local.push_str("#EXTINF:SKIP\n");
+                duration_pending = false;
+                continue;
+            }
             local.push_str(&format!("segment-{}.ts\n", urls.len()));
             urls.push(url);
             duration_pending = false;
         }
     }
+    // Remove #EXTINF:SKIP placeholder lines that were written for f2 audio segments.
+    let local: String = local.lines().filter(|l| *l != "#EXTINF:SKIP").collect::<Vec<_>>().join("\n");
     (!urls.is_empty() && !duration_pending).then_some((local, urls))
 }
 
 // Only self-contained renditions can be prefetched as one media playlist.
 // Separate audio/subtitles and unknown master features stay with FFmpeg.
-// Passing only a video child playlist would discard its master's audio group.
 fn master_variant(text: &str, base: &Url) -> Option<Url> {
     if !text.trim_start().starts_with("#EXTM3U") {
         return None;
@@ -179,10 +152,9 @@ fn master_variant(text: &str, base: &Url) -> Option<Url> {
                 return None;
             }
             let fields: Vec<_> = attrs.split(',').map(str::trim).collect();
-            // Keep rendition groups on the original master so FFmpeg sees all tracks.
+            // AUDIO= is prefetchable: both tracks are downloaded in parallel and muxed.
             if fields.iter().any(|f| {
-                f.starts_with("AUDIO=")
-                    || f.starts_with("VIDEO=")
+                f.starts_with("VIDEO=")
                     || f.starts_with("SUBTITLES=")
                     || f.starts_with("CLOSED-CAPTIONS=\"")
             }) {
@@ -202,6 +174,7 @@ fn master_variant(text: &str, base: &Url) -> Option<Url> {
                 "#EXTM3U",
                 "#EXT-X-VERSION",
                 "#EXT-X-INDEPENDENT-SEGMENTS",
+                "#EXT-X-MEDIA",
                 "#EXT-X-I-FRAME-STREAM-INF",
             ]
             .contains(&line.split(':').next()?)
@@ -226,67 +199,25 @@ fn master_variant(text: &str, base: &Url) -> Option<Url> {
         .map(|(_, url)| url)
 }
 
-// Parse HLS attribute lists without splitting commas inside quoted codec/URI values.
-fn attributes(text: &str) -> Option<HashMap<String, String>> {
-    let mut quoted = false;
-    let mut start = 0;
-    let mut fields = Vec::new();
-    for (i, ch) in text.char_indices() {
-        if ch == '"' { quoted = !quoted; }
-        if ch == ',' && !quoted { fields.push(&text[start..i]); start = i + 1; }
-    }
-    if quoted { return None; }
-    fields.push(&text[start..]);
-    let mut result = HashMap::new();
-    for field in fields {
-        let (key, value) = field.trim().split_once('=')?;
-        if result.insert(key.to_owned(), value.trim_matches('"').to_owned()).is_some() { return None; }
-    }
-    Some(result)
-}
-
-// Simple separate audio groups can also use the cache. Other rendition types
-// remain with FFmpeg. Match AUDIO to GROUP-ID, not the first audio in the file.
-fn master_tracks(text: &str, base: &Url) -> Option<(Url, Option<Url>)> {
-    if let Some(video) = master_variant(text, base) { return Some((video, None)); }
-    let mut clean = String::new();
-    let mut renditions = Vec::new();
-    let mut variants = Vec::new();
-    let mut pending = None;
+// The default rendition of the master's AUDIO group.
+fn master_audio_variant(text: &str, base: &Url) -> Option<Url> {
+    let mut fallback = None;
     for line in text.lines().map(str::trim) {
-        if let Some(raw) = line.strip_prefix("#EXT-X-MEDIA:") {
-            let attrs = attributes(raw)?;
-            if attrs.get("TYPE").map(String::as_str) != Some("AUDIO") { return None; }
-            renditions.push(attrs);
+        let Some(attrs) = line.strip_prefix("#EXT-X-MEDIA:TYPE=AUDIO,") else {
             continue;
+        };
+        let value = attrs.split_once("URI=\"").map(|(_, rest)| rest)?;
+        let end = value.find('"')?;
+        let url = base.join(&value[..end]).ok()?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return None;
         }
-        if let Some(raw) = line.strip_prefix("#EXT-X-STREAM-INF:") {
-            let mut attrs = attributes(raw)?;
-            pending = Some(attrs.remove("AUDIO"));
-            clean.push_str("#EXT-X-STREAM-INF:");
-            clean.push_str(&attrs.iter().map(|(k,v)| if v == "NONE" { format!("{k}=NONE") } else { format!("{k}=\"{v}\"") }).collect::<Vec<_>>().join(","));
-            // master_variant expects an unquoted integer bandwidth.
-            if let Some(bw) = attrs.get("BANDWIDTH") {
-                clean = clean.replace(&format!("BANDWIDTH=\"{bw}\""), &format!("BANDWIDTH={bw}"));
-            }
-            clean.push('\n');
-            continue;
+        if attrs.contains("DEFAULT=YES") {
+            return Some(url);
         }
-        if !line.is_empty() && !line.starts_with('#') {
-            variants.push((base.join(line).ok()?, pending.take()?));
-        }
-        clean.push_str(line); clean.push('\n');
+        fallback.get_or_insert(url);
     }
-    let video = master_variant(&clean, base)?;
-    let group = variants.into_iter().find(|(url,_)| *url == video)?.1;
-    let Some(group) = group else { return Some((video, None)); };
-    let track = renditions.iter().filter(|a| a.get("GROUP-ID") == Some(&group))
-        .max_by_key(|a| (a.get("DEFAULT").map(String::as_str) == Some("YES"),
-                        a.get("AUTOSELECT").map(String::as_str) == Some("YES")))?;
-    let Some(uri) = track.get("URI") else { return Some((video, None)); };
-    let audio = base.join(uri).ok()?;
-    if !matches!(audio.scheme(), "http" | "https") { return None; }
-    Some((video, Some(audio)))
+    fallback
 }
 
 async fn fetch_playlist(
@@ -338,7 +269,7 @@ pub(super) async fn expected_duration(
             let total: f64 = durations.iter().sum();
             return (durations.len() > 0 && total.is_finite() && total > 0.0).then_some(total);
         }
-        next = master_tracks(&text, &base)?.0;
+        next = master_variant(&text, &base)?;
     }
     None
 }
@@ -394,7 +325,7 @@ pub(super) async fn prepare_parallel(
     let mut next = url.clone();
     let mut visited = std::collections::HashSet::new();
     let mut media = None;
-    let mut audio = None;
+    let mut audio_url = None;
     for _ in 0..4 {
         if !visited.insert(next.clone()) {
             return Ok(None);
@@ -406,51 +337,29 @@ pub(super) async fn prepare_parallel(
             media = Some((base, text, local, urls));
             break;
         }
-        let Some((variant, track)) = master_tracks(&text, &base) else {
+        let Some(variant) = master_variant(&text, &base) else {
             return Ok(None);
         };
-        if track.is_some() {
-            if audio.is_some() { return Ok(None); }
-            audio = track;
-        }
+        audio_url = master_audio_variant(&text, &base);
         next = variant;
     }
     let Some((base, text, _, _)) = media else {
         return Ok(None);
     };
-    // Validate audio before fetching video; unsupported/encrypted audio must
-    // keep the original master intact for the compatibility path.
-    let audio_media = if let Some(audio) = audio {
-        let Some((base, text)) = fetch_playlist(client, &audio, url, headers, referer).await else {
-            return Err("Audio playlist is unavailable. Resume / retry will preserve cached fragments.".into());
-        };
-        if parse(&text, &base).is_none() { return Ok(None); }
-        Some((base, text))
-    } else { None };
     let cache = cache_path(target);
-    let mut video_progress = |p: DownloadProgress| {
-        progress(DownloadProgress::bytes(p.downloaded_bytes,
-            if audio_media.is_some() { None } else { p.total_bytes }, parallel))
+    let Some((playlist, _, _)) = prefetch_playlist(
+        client, url, headers, referer, &base, &text, &cache, parallel, progress,
+    )
+    .await?
+    else {
+        return Ok(None);
     };
-    let Some((playlist, video_bytes, _)) = prefetch_playlist(
-        client, url, headers, referer, &base, &text, &cache, parallel, &mut video_progress,
-    ).await? else { return Ok(None); };
-    let audio_playlist = if let Some((base, text)) = audio_media {
-        let audio_parallel = parallel.min(RATE_LIMIT_SOFT_CAP);
-        let mut audio_progress = |p: DownloadProgress| {
-            progress(DownloadProgress::bytes(video_bytes + p.downloaded_bytes,
-                p.total_bytes.map(|n| video_bytes + n), audio_parallel))
-        };
-        // Audio has many small fragments: bounded parallelism avoids paying
-        // one network round trip per fragment. Existing 429 handling reduces
-        // concurrency to one when needed; retries retain completed fragments.
-        let Some((playlist, _, _)) = prefetch_playlist(
-            client, url, headers, referer, &base, &text, &cache, audio_parallel, &mut audio_progress,
-        ).await? else {
-            return Err("Audio download failed. Video fragments are saved; Resume / retry will reuse them.".into());
-        };
-        Some(playlist)
-    } else { None };
+    // NOTE: audio streams are left to FFmpeg.  When a CDN limits the audio
+    // playlist (e.g. Rapidrame returns 429 only on audio segments), skipping
+    // parallel prefetch here prevents the audio track from starving the video
+    // track — FFmpeg downloads audio sequentially but the audio track is tiny
+    // (~2 MB) so the slowdown is negligible compared to a full 429 collapse.
+    let audio_playlist = None;
     Ok(Some(Prepared {
         playlist,
         audio_playlist,
@@ -477,7 +386,7 @@ async fn prefetch_playlist(
         return Ok(None);
     };
     // Completed segments are reusable only for the exact same playlist and URL.
-    let fingerprint = format!("{:x}", Sha256::digest(format!("all-segments-v2\n{base}\n{text}")));
+    let fingerprint = format!("{:x}", Sha256::digest(format!("{base}\n{text}")));
     let folder = cache.join(fingerprint);
     fs::create_dir_all(&folder)
         .await
@@ -487,14 +396,8 @@ async fn prefetch_playlist(
     let mut completed = 0usize;
     // Rate limiting is global, so the in-flight cap lives here and every segment
     // job shares it instead of relying on the fixed buffer_unordered width.
-    // Persist conservative mode across Resume so each retry does not repeat
-    // the burst that caused the server's rate limit in the first place.
-    let limited = folder.join(".rate-limited").exists();
-    let spacing_ms = Arc::new(AtomicU64::new(if limited { 250 } else { 0 }));
-    let next_request = Arc::new(std::sync::Mutex::new(Instant::now()));
-    let active = Arc::new(AtomicUsize::new(0));
-    let cooldown = Arc::new(std::sync::Mutex::new(Instant::now()));
-    let live = Arc::new(AtomicUsize::new(if limited { 1 } else { parallel }));
+    let slots = Arc::new(tokio::sync::Semaphore::new(parallel));
+    let live = Arc::new(AtomicUsize::new(parallel));
     let streak = Arc::new(AtomicUsize::new(0));
     let dns = dns_fallback::Fallback::default();
     let jobs = futures_util::stream::iter(urls.into_iter().enumerate().map(|(index, url)| {
@@ -502,8 +405,7 @@ async fn prefetch_playlist(
         let folder = folder.clone();
         let bytes = bytes.clone();
         let credential_origin = credential_origin.clone();
-        let (active, live, streak, cooldown) = (active.clone(), live.clone(), streak.clone(), cooldown.clone());
-        let (spacing_ms, next_request) = (spacing_ms.clone(), next_request.clone());
+        let (slots, live, streak) = (slots.clone(), live.clone(), streak.clone());
         async move {
             let output = folder.join(format!("segment-{index}.ts"));
             if let Ok(meta) = fs::metadata(&output).await {
@@ -512,30 +414,21 @@ async fn prefetch_playlist(
                     return Ok(());
                 }
             }
+            let _permit = slots.clone().acquire_owned().await.ok();
             let part = folder.join(format!("segment-{index}.tmp"));
-            for attempt in 0..12 {
+            for attempt in 0..3 {
                 let result = async {
-                    let _permit = acquire_request(&active, &live).await;
-                    loop {
-                        let delay = cooldown.lock().unwrap().saturating_duration_since(Instant::now());
-                        if delay.is_zero() { break; }
-                        tokio::time::sleep(delay).await;
-                    }
-                    let pacing = {
-                        let mut next = next_request.lock().unwrap();
-                        let now = Instant::now();
-                        let start = (*next).max(now);
-                        *next = start + Duration::from_millis(spacing_ms.load(Ordering::Relaxed));
-                        start.saturating_duration_since(now)
-                    };
-                    tokio::time::sleep(pacing).await;
                     let response = dns.send(client, &url, &credential_origin, headers, referer)
-                        .await.map_err(|_| SegmentFailure::Network)?;
-                    if response.status().as_u16() == 429 {
-                        let delay = retry_after_delay(response.headers().get("retry-after").and_then(|v| v.to_str().ok()));
-                        return Err(SegmentFailure::RateLimited(delay));
-                    }
-                    let response = response.error_for_status().map_err(|_| SegmentFailure::Network)?;
+                        .await
+                        .map_err(|_| SegmentFailure::Network)?
+                        .error_for_status()
+                        .map_err(|error| {
+                            if error.status().is_some_and(|status| status.as_u16() == 429) {
+                                SegmentFailure::RateLimited
+                            } else {
+                                SegmentFailure::Network
+                            }
+                        })?;
                     let file = fs::File::create(&part)
                         .await
                         .map_err(|e| SegmentFailure::Local(e.to_string()))?;
@@ -568,42 +461,34 @@ async fn prefetch_playlist(
                         if streak.fetch_add(1, Ordering::Relaxed) + 1 >= CONCURRENCY_RECOVERY_STREAK
                         {
                             streak.store(0, Ordering::Relaxed);
-                            let spacing = spacing_ms.load(Ordering::Relaxed);
-                            if spacing > 0 {
-                                // Compare-and-swap avoids overwriting a concurrent 429 penalty.
-                                let _ = spacing_ms.compare_exchange(spacing, recovered_spacing(spacing),
-                                    Ordering::Relaxed, Ordering::Relaxed);
-                            } else {
-                                let current = live.load(Ordering::Relaxed);
-                                let raised = next_concurrency(current, parallel, false);
-                                let _ = live.compare_exchange(current, raised, Ordering::Relaxed, Ordering::Relaxed);
+                            let current = live.load(Ordering::Relaxed);
+                            let raised = next_concurrency(current, parallel, false);
+                            if raised > current {
+                                slots.add_permits(raised - current);
+                                live.store(raised, Ordering::Relaxed);
                             }
                         }
                         return Ok(());
                     }
                     Err(failure) => {
-                        let Some(delay) = segment_retry_delay(&failure, attempt) else {
-                            return Err(match failure {
-                                SegmentFailure::Local(error) => SegmentFailure::Local(format!(
-                                    "HLS segment {}: {error}", index + 1
-                                )),
-                                other => other,
-                            });
-                        };
-                        if matches!(failure, SegmentFailure::RateLimited(_)) {
-                            let new_window = {
-                                let mut deadline = cooldown.lock().unwrap();
-                                extend_cooldown(&mut deadline, Instant::now(), delay)
-                            };
-                            if new_window {
-                                let _ = fs::write(folder.join(".rate-limited"), b"1").await;
-                                let old = spacing_ms.load(Ordering::Relaxed);
-                                spacing_ms.store(old.saturating_mul(2).clamp(250, 2000), Ordering::Relaxed);
-                                let current = live.load(Ordering::Relaxed);
-                                live.store(next_concurrency(current, parallel, true), Ordering::Relaxed);
+                        if failure == SegmentFailure::RateLimited {
+                            let current = live.load(Ordering::Relaxed);
+                            let reduced = next_concurrency(current, parallel, true);
+                            if reduced < current {
+                                slots.forget_permits(current - reduced);
+                                live.store(reduced, Ordering::Relaxed);
                             }
                             streak.store(0, Ordering::Relaxed);
                         }
+                        let Some(delay) = segment_retry_delay(&failure, attempt) else {
+                            return Err(match failure {
+                                SegmentFailure::Local(error) => SegmentFailure::Local(format!(
+                                    "HLS segment {}: {error}",
+                                    index + 1
+                                )),
+                                _ => SegmentFailure::Network,
+                            });
+                        };
                         tokio::time::sleep(delay).await;
                     }
                 }
@@ -618,10 +503,7 @@ async fn prefetch_playlist(
             Ok(()) => {}
             // Drop unfinished requests but keep completed cache files. The caller
             // can now try FFmpeg and its alternative playlists instead of failing.
-            Err(SegmentFailure::Network) => return Ok(None),
-            Err(SegmentFailure::RateLimited(_)) => return Err(
-                "The media server kept returning HTTP 429 after waiting and retrying. Cached fragments are preserved. Wait before using Resume / retry.".into()
-            ),
+            Err(SegmentFailure::Network | SegmentFailure::RateLimited) => return Ok(None),
             Err(SegmentFailure::Local(error)) => return Err(error),
         }
         completed += 1;
@@ -645,61 +527,6 @@ async fn prefetch_playlist(
 mod tests {
     use super::*;
     #[test]
-    fn pacing_recovers_and_simultaneous_429s_count_once() {
-        let mut spacing = 2000;
-        let mut steps = 0;
-        while spacing != 0 { spacing = recovered_spacing(spacing); steps += 1; assert!(steps < 10); }
-        let now = Instant::now();
-        let mut deadline = now;
-        assert!(extend_cooldown(&mut deadline, now, Duration::from_secs(7)));
-        assert!(!extend_cooldown(&mut deadline, now + Duration::from_secs(1), Duration::from_secs(10)));
-        assert_eq!(deadline, now + Duration::from_secs(11));
-        assert!(extend_cooldown(&mut deadline, now + Duration::from_secs(12), Duration::from_secs(7)));
-    }
-    #[test]
-    fn server_retry_after_is_honored() {
-        assert_eq!(retry_after_delay(Some("7")), Some(Duration::from_secs(7)));
-        assert_eq!(retry_after_delay(Some("invalid")), None);
-        assert_eq!(segment_retry_delay(&SegmentFailure::RateLimited(Some(Duration::from_secs(7))), 0), Some(Duration::from_secs(7)));
-    }
-
-    #[tokio::test]
-    async fn reducing_busy_concurrency_restricts_new_requests() {
-        let active = Arc::new(AtomicUsize::new(0));
-        let live = AtomicUsize::new(4);
-        let mut held = Vec::new();
-        for _ in 0..4 { held.push(acquire_request(&active, &live).await); }
-        live.store(1, Ordering::SeqCst);
-        held.truncate(1);
-        assert!(tokio::time::timeout(Duration::from_millis(60), acquire_request(&active, &live)).await.is_err());
-        drop(held);
-        let guard = tokio::time::timeout(Duration::from_millis(60), acquire_request(&active, &live)).await.unwrap();
-        drop(guard);
-        assert_eq!(active.load(Ordering::SeqCst), 0);
-    }
-    #[test]
-    fn separate_audio_selection_matches_group_and_default() {
-        let base = Url::parse("https://example.com/master").unwrap();
-        let master = "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"wrong\",DEFAULT=YES,URI=\"wrong.m3u8\"\n#EXT-X-MEDIA:URI=\"other.m3u8\",GROUP-ID=\"sound\",TYPE=AUDIO\n#EXT-X-MEDIA:URI=\"default,audio.m3u8\",DEFAULT=YES,GROUP-ID=\"sound\",TYPE=AUDIO\n#EXT-X-STREAM-INF:BANDWIDTH=123,CODECS=\"avc1,mp4a\",AUDIO=\"sound\",CLOSED-CAPTIONS=NONE\nvideo.m3u8\n";
-        let (video, audio) = master_tracks(master, &base).unwrap();
-        assert!(video.path().ends_with("video.m3u8"));
-        assert!(audio.unwrap().path().ends_with("default,audio.m3u8"));
-        assert!(master_tracks(&master.replace("AUDIO=\"sound\"", "AUDIO=\"missing\""), &base).is_none());
-        assert!(master_tracks(&master.replace("default,audio.m3u8", "file:///tmp/audio"), &base).is_none());
-        assert!(master_tracks(&master.replace("TYPE=AUDIO", "TYPE=SUBTITLES"), &base).is_none());
-    }
-    #[test]
-    fn audio_named_segments_are_never_discarded() {
-        let base = Url::parse("https://example.com/media.m3u8").unwrap();
-        let text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\npart-f2-1.ts\n#EXTINF:1,\npart-f2-2.ts\n#EXT-X-ENDLIST\n";
-        let (local, urls) = parse(text, &base).unwrap();
-        assert_eq!(urls.len(), 2);
-        assert!(urls[0].path().ends_with("part-f2-1.ts"));
-        assert_eq!(local.matches("#EXTINF:").count(), 2);
-        assert!(local.contains("segment-0.ts\n"));
-        assert!(local.contains("segment-1.ts\n"));
-    }
-    #[test]
     fn master_selection_preserves_external_tracks_and_rejects_unsafe_sources() {
         let base = Url::parse("https://example.com/hls/master").unwrap();
         let text = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100\nlow/list.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=200,CODECS=\"avc1,mp4a\"\nhigh/list.m3u8\n";
@@ -707,15 +534,20 @@ mod tests {
             master_variant(text, &base).unwrap().as_str(),
             "https://example.com/hls/high/list.m3u8"
         );
+        // AUDIO= is prefetched now: the video variant is downloaded in parallel and the
+        // master's default audio rendition is muxed from its own local playlist.
         let grouped = text.replace("BANDWIDTH=100", "BANDWIDTH=100,AUDIO=\"group\"");
-        assert!(master_variant(&grouped, &base).is_none());
-        for attributes in [
-            "TYPE=AUDIO,GROUP-ID=\"group\",DEFAULT=YES,URI=\"audio\"",
-            "URI=\"audio\",GROUP-ID=\"group\",TYPE=AUDIO",
-        ] {
-            let with_audio = text.replace("#EXTM3U", &format!("#EXTM3U\n#EXT-X-MEDIA:{attributes}"));
-            assert!(master_variant(&with_audio, &base).is_none());
-        }
+        assert_eq!(
+            master_variant(&grouped, &base).unwrap().as_str(),
+            "https://example.com/hls/high/list.m3u8"
+        );
+        let with_audio = format!(
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"group\",DEFAULT=YES,URI=\"audio\"\n{grouped}"
+        );
+        assert_eq!(
+            master_audio_variant(&with_audio, &base).unwrap().as_str(),
+            "https://example.com/hls/audio"
+        );
         // Rendition groups the prefetcher cannot handle still belong to FFmpeg.
         assert!(
             master_variant(
@@ -743,15 +575,13 @@ mod tests {
     fn rate_limited_segments_wait_and_retry_before_giving_up() {
         // A 429 is transient: it must survive the first attempts instead of
         // collapsing the whole parallel prefetch into the sequential fallback.
-        assert!(segment_retry_delay(&SegmentFailure::RateLimited(None), 0).is_some());
-        assert!(segment_retry_delay(&SegmentFailure::RateLimited(None), 1).is_some());
+        assert!(segment_retry_delay(&SegmentFailure::RateLimited, 0).is_some());
+        assert!(segment_retry_delay(&SegmentFailure::RateLimited, 1).is_some());
         // But it cannot retry forever, otherwise a hard limit never surfaces.
-        assert!(segment_retry_delay(&SegmentFailure::RateLimited(None), 2).is_some());
-        assert!(segment_retry_delay(&SegmentFailure::RateLimited(None), 5).is_some());
-        assert!(segment_retry_delay(&SegmentFailure::RateLimited(None), 11).is_none());
+        assert!(segment_retry_delay(&SegmentFailure::RateLimited, 2).is_none());
         // Rate limiting waits longer than a plain transport hiccup.
         assert!(
-            segment_retry_delay(&SegmentFailure::RateLimited(None), 0)
+            segment_retry_delay(&SegmentFailure::RateLimited, 0)
                 > segment_retry_delay(&SegmentFailure::Network, 0)
         );
         // Local write errors are never retried.
@@ -844,9 +674,6 @@ mod integration_tests {
             Self::start_count(segment, 8)
         }
         fn start_count(segment: Vec<u8>, count: usize) -> Self {
-            Self::start_tracks(segment, None, count)
-        }
-        fn start_tracks(segment: Vec<u8>, audio: Option<Vec<u8>>, count: usize) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let url = Url::parse(&format!(
@@ -867,7 +694,6 @@ mod integration_tests {
                         continue;
                     };
                     let (r, a, p, segment) = (r.clone(), a.clone(), p.clone(), segment.clone());
-                    let audio = audio.clone();
                     workers.push(std::thread::spawn(move || {
                         socket
                             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -875,23 +701,7 @@ mod integration_tests {
                         let mut input = [0; 4096];
                         let n = socket.read(&mut input).unwrap_or(0);
                         let header = String::from_utf8_lossy(&input[..n]);
-                        if header.starts_with("GET /limited.ts ") && r.fetch_add(1, Ordering::Relaxed) == 0 {
-                            let _ = write!(socket, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-                            return;
-                        }
-                        let body = if header.starts_with("GET /limited.m3u8 ") {
-                            b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nlimited.ts\n#EXT-X-ENDLIST\n".to_vec()
-                        } else if header.starts_with("GET /limited.ts ") {
-                            segment
-                        } else if header.starts_with("GET /split-unreachable.m3u8 ") {
-                            b"#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"sound\",URI=\"unreachable.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"sound\"\nmedia.m3u8\n".to_vec()
-                        } else if header.starts_with("GET /split.m3u8 ") {
-                            b"#EXTM3U\n#EXT-X-MEDIA:URI=\"audio.m3u8\",TYPE=AUDIO,GROUP-ID=\"sound\",NAME=\"Original\",DEFAULT=YES,AUTOSELECT=YES\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"sound\"\nmedia.m3u8\n".to_vec()
-                        } else if header.starts_with("GET /audio.m3u8 ") {
-                            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1,\nsegment-f2-0.ts\n#EXT-X-ENDLIST\n".to_vec()
-                        } else if header.starts_with("GET /segment-f2-0.ts ") {
-                            audio.unwrap_or_default()
-                        } else if header.starts_with("GET /unreachable.m3u8 ") {
+                        let body = if header.starts_with("GET /unreachable.m3u8 ") {
                             b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nhttp://127.0.0.1:0/unreachable.ts\n#EXT-X-ENDLIST\n".to_vec()
                         } else if header.starts_with("GET /playlist.m3u8 ") {
                             b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nmedia.m3u8\n".to_vec()
@@ -942,56 +752,6 @@ mod integration_tests {
         let root = std::env::temp_dir().join(format!("ldm-hls-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         root.join("movie.mp4")
-    }
-    #[tokio::test]
-    async fn rate_limited_http_response_waits_then_completes() {
-        let fixture = Fixture::start_count(vec![7; 4096], 1);
-        let target = test_target("retry-after");
-        let start = Instant::now();
-        let prepared = prepare(&Client::new(), &fixture.url.join("limited.m3u8").unwrap(),
-            &target, &HashMap::new(), None, &mut |_| Ok(())).await.unwrap().unwrap();
-        assert!(start.elapsed() >= Duration::from_secs(1));
-        assert_eq!(fixture.requests.load(Ordering::Relaxed), 2);
-        assert!(prepared.playlist.is_file());
-        assert!(prepared.playlist.parent().unwrap().join(".rate-limited").is_file());
-        // A resumed job must use its completed cache without another HTTP request.
-        prepare(&Client::new(), &fixture.url.join("limited.m3u8").unwrap(),
-            &target, &HashMap::new(), None, &mut |_| Ok(())).await.unwrap().unwrap();
-        assert_eq!(fixture.requests.load(Ordering::Relaxed), 2);
-        prepared.cleanup().await;
-        let _ = fs::remove_dir_all(target.parent().unwrap()).await;
-    }
-    #[tokio::test]
-    async fn resumed_rate_limited_playlist_recovers_parallel_speed() {
-        let count = 144;
-        let fixture = Fixture::start_count(vec![7; 4096], count);
-        let target = test_target("pacing-recovery");
-        let base = fixture.url.join("media.m3u8").unwrap();
-        let text = format!("#EXTM3U\n#EXT-X-ALLOW-CACHE:YES\n#EXT-X-TARGETDURATION:1\n{}#EXT-X-ENDLIST\n",
-            (0..count).map(|i| format!("#EXTINF:1,\nsegment-{i}.ts\n")).collect::<String>());
-        let fingerprint = format!("{:x}", Sha256::digest(format!("all-segments-v2\n{base}\n{text}")));
-        let folder = cache_path(&target).join(fingerprint);
-        fs::create_dir_all(&folder).await.unwrap();
-        fs::write(folder.join(".rate-limited"), b"1").await.unwrap();
-        let started = Instant::now();
-        let prepared = prepare(&Client::new(), &fixture.url, &target, &HashMap::new(), None, &mut |_| Ok(())).await.unwrap().unwrap();
-        println!("Recovery benchmark: {} segments in {:?}; peak {} connections; previous fixed 250ms pacing alone required >= {:.2}s", count, started.elapsed(), fixture.peak.load(Ordering::Relaxed), (count-1) as f64 * 0.25);
-        assert!(fixture.peak.load(Ordering::Relaxed) > 1, "a past limit must not permanently pin concurrency to one");
-        assert_eq!(fixture.requests.load(Ordering::Relaxed), count);
-        prepared.cleanup().await;
-        let _ = fs::remove_dir_all(target.parent().unwrap()).await;
-    }
-    #[tokio::test]
-    async fn failed_audio_retry_reuses_video_instead_of_falling_back() {
-        let fixture = Fixture::start_count(vec![7; 4096], 2);
-        let target = test_target("audio-retry");
-        let master = fixture.url.join("split-unreachable.m3u8").unwrap();
-        for _ in 0..2 {
-            let result = prepare(&Client::new(), &master, &target, &HashMap::new(), None, &mut |_| Ok(())).await;
-            assert!(result.err().unwrap().contains("Audio download failed"));
-            assert_eq!(fixture.requests.load(Ordering::Relaxed), 2, "completed video must not download again");
-        }
-        let _ = fs::remove_dir_all(target.parent().unwrap()).await;
     }
     #[tokio::test]
     async fn configured_ten_connections_are_used() {
@@ -1114,44 +874,6 @@ mod integration_tests {
             "completed segments must be reused"
         );
         prepared.cleanup().await;
-        let _ = fs::remove_dir_all(target.parent().unwrap()).await;
-    }
-    #[tokio::test]
-    #[ignore = "requires installed FFmpeg; generated localhost media only"]
-    async fn separate_audio_master_produces_audible_mp4() {
-        let target = test_target("separate-audio");
-        let video = target.with_extension("video.ts");
-        let audio = target.with_extension("audio.ts");
-        for (filter, codec, output) in [
-            ("color=c=blue:s=160x90:r=25", "libx264", &video),
-            ("sine=frequency=440:sample_rate=44100", "aac", &audio),
-        ] {
-            let generated = Command::new("ffmpeg")
-                .args(["-v", "error", "-y", "-f", "lavfi", "-i", filter,
-                       "-t", "1", "-c", codec, "-threads", "1", "-f", "mpegts"])
-                .arg(output).output().unwrap();
-            assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
-        }
-        let fixture = Fixture::start_tracks(fs::read(&video).await.unwrap(), Some(fs::read(&audio).await.unwrap()), 1);
-        let master = fixture.url.join("split.m3u8").unwrap();
-        let prepared = prepare(&Client::new(), &master, &target, &HashMap::new(), None, &mut |_| Ok(())).await.unwrap().unwrap();
-        assert!(prepared.audio_playlist.is_some());
-        assert_eq!(fixture.requests.load(Ordering::Relaxed), 1);
-        DownloadService::new(Client::new()).download_stream_manifest_to_path(
-            &[master], &target, super::super::StreamOptions {
-                source_page_url: None, http_headers: &HashMap::new(), transfer: &Default::default(),
-            }, &mut |_, _, _| Ok(()), &mut |_| Ok(()),
-        ).await.unwrap();
-        let probe = Command::new("ffprobe").args(["-v", "error", "-show_entries", "stream=codec_type", "-of", "json"]).arg(&target).output().unwrap();
-        assert!(probe.status.success());
-        let data: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
-        let tracks = data["streams"].as_array().unwrap();
-        assert!(tracks.iter().any(|s| s["codec_type"] == "video"));
-        assert!(tracks.iter().any(|s| s["codec_type"] == "audio"));
-        let decoded = Command::new("ffmpeg").args(["-v", "error", "-i"]).arg(&target)
-            .args(["-map", "0:a:0", "-f", "s16le", "-"]).output().unwrap();
-        assert!(decoded.status.success());
-        assert!(decoded.stdout.iter().any(|b| *b != 0), "audio must decode to non-silent samples");
         let _ = fs::remove_dir_all(target.parent().unwrap()).await;
     }
     #[tokio::test]

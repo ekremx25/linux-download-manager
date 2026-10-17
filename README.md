@@ -63,21 +63,6 @@ Run as your normal user. The installer requests `sudo` for system dependencies a
 
 *Screenshots show example transfers. Colors follow your system theme; speeds depend on your network and the source server.*
 
-## Unreleased fixes
-
-- Recover HLS speed after temporary rate limits: successful requests gradually
-  reduce pacing and restore concurrency. Simultaneous 429 responses share one
-  slowdown penalty while every Retry-After deadline is honored. Server-side
-  limits can still restrict throughput.
-
-- Cache supported separate HLS video and audio tracks before merging: video uses
-  parallel transfers, while audio uses up to four workers and slows down on rate limits. Audio
-  failures preserve cached fragments for retry. Unsupported manifests still use
-  FFmpeg. Segment filenames no longer cause audio fragments to be discarded.
-- Direct HLS transfers no longer run a separate yt-dlp download first. Progress
-  reaches 100% only after the output is finalized. Previously downloaded silent
-  files need to be downloaded again.
-
 ## What's new in v0.2.5
 
 - **Recovery from unreachable CDN addresses.** If an HLS fragment connection fails, LDM can retry using an independent DNS answer instead of immediately abandoning parallel downloads.

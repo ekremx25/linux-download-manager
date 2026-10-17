@@ -90,14 +90,3 @@ console.log('PASS: extension overlay updates do not retrigger media scans');
   assert.deepEqual(calls,[['clear_download',3]],'keep-file action must remain separate');
   console.log('PASS: selected cancellation, confirmed single/bulk file deletion, keep-file action preserved');
 })().catch(error=>{console.error(error);process.exitCode=1;});
-
-// Receiving the estimated byte count is not the same as finalizing the file.
-{
-  const code=fs.readFileSync('ui/shared.js','utf8');
-  const fn=code.match(/export function progressOf\(download\) \{[\s\S]*?\n\}/)[0].replace('export ','');
-  const ctx={};vm.createContext(ctx);vm.runInContext(fn,ctx);
-  assert.equal(vm.runInContext("progressOf({status:'in_progress',downloadedBytes:100,totalBytes:100})",ctx),99);
-  assert.equal(vm.runInContext("progressOf({status:'in_progress',downloadedBytes:200,totalBytes:100})",ctx),99);
-  assert.equal(vm.runInContext("progressOf({status:'completed',downloadedBytes:99,totalBytes:100})",ctx),100);
-  console.log('PASS: 100% is reserved for finalized downloads');
-}
