@@ -20,7 +20,7 @@ enum SegmentFailure {
 /// to a rate-limited CDN instead of collapsing into the sequential fallback.
 fn segment_retry_delay(failure: &SegmentFailure, attempt: u32) -> Option<Duration> {
     match failure {
-        SegmentFailure::RateLimited(retry_after) if attempt < 5 => Some(
+        SegmentFailure::RateLimited(retry_after) if attempt < 11 => Some(
             retry_after.unwrap_or_default().max(Duration::from_secs(1 << attempt.min(4)))
         ),
         SegmentFailure::Network if attempt + 1 < SEGMENT_MAX_ATTEMPTS =>
@@ -474,9 +474,14 @@ async fn prefetch_playlist(
     let mut completed = 0usize;
     // Rate limiting is global, so the in-flight cap lives here and every segment
     // job shares it instead of relying on the fixed buffer_unordered width.
+    // Persist conservative mode across Resume so each retry does not repeat
+    // the burst that caused the server's rate limit in the first place.
+    let limited = folder.join(".rate-limited").exists();
+    let spacing_ms = Arc::new(AtomicU64::new(if limited { 250 } else { 0 }));
+    let next_request = Arc::new(std::sync::Mutex::new(Instant::now()));
     let active = Arc::new(AtomicUsize::new(0));
     let cooldown = Arc::new(std::sync::Mutex::new(Instant::now()));
-    let live = Arc::new(AtomicUsize::new(parallel));
+    let live = Arc::new(AtomicUsize::new(if limited { 1 } else { parallel }));
     let streak = Arc::new(AtomicUsize::new(0));
     let dns = dns_fallback::Fallback::default();
     let jobs = futures_util::stream::iter(urls.into_iter().enumerate().map(|(index, url)| {
@@ -485,6 +490,7 @@ async fn prefetch_playlist(
         let bytes = bytes.clone();
         let credential_origin = credential_origin.clone();
         let (active, live, streak, cooldown) = (active.clone(), live.clone(), streak.clone(), cooldown.clone());
+        let (spacing_ms, next_request) = (spacing_ms.clone(), next_request.clone());
         async move {
             let output = folder.join(format!("segment-{index}.ts"));
             if let Ok(meta) = fs::metadata(&output).await {
@@ -494,7 +500,7 @@ async fn prefetch_playlist(
                 }
             }
             let part = folder.join(format!("segment-{index}.tmp"));
-            for attempt in 0..6 {
+            for attempt in 0..12 {
                 let result = async {
                     let _permit = acquire_request(&active, &live).await;
                     loop {
@@ -502,6 +508,14 @@ async fn prefetch_playlist(
                         if delay.is_zero() { break; }
                         tokio::time::sleep(delay).await;
                     }
+                    let pacing = {
+                        let mut next = next_request.lock().unwrap();
+                        let now = Instant::now();
+                        let start = (*next).max(now);
+                        *next = start + Duration::from_millis(spacing_ms.load(Ordering::Relaxed));
+                        start.saturating_duration_since(now)
+                    };
+                    tokio::time::sleep(pacing).await;
                     let response = dns.send(client, &url, &credential_origin, headers, referer)
                         .await.map_err(|_| SegmentFailure::Network)?;
                     if response.status().as_u16() == 429 {
@@ -543,7 +557,7 @@ async fn prefetch_playlist(
                             streak.store(0, Ordering::Relaxed);
                             let current = live.load(Ordering::Relaxed);
                             let raised = next_concurrency(current, parallel, false);
-                            if raised > current {
+                            if raised > current && spacing_ms.load(Ordering::Relaxed) == 0 {
                                 live.store(raised, Ordering::Relaxed);
                             }
                         }
@@ -551,6 +565,9 @@ async fn prefetch_playlist(
                     }
                     Err(failure) => {
                         if matches!(failure, SegmentFailure::RateLimited(_)) {
+                            let _ = fs::write(folder.join(".rate-limited"), b"1").await;
+                            let _ = spacing_ms.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+                                |ms| Some(ms.saturating_mul(2).clamp(250, 2000)));
                             let current = live.load(Ordering::Relaxed);
                             let reduced = next_concurrency(current, parallel, true);
                             if reduced < current {
@@ -564,7 +581,7 @@ async fn prefetch_playlist(
                                     "HLS segment {}: {error}",
                                     index + 1
                                 )),
-                                _ => SegmentFailure::Network,
+                                other => other,
                             });
                         };
                         if matches!(failure, SegmentFailure::RateLimited(_)) {
@@ -587,7 +604,10 @@ async fn prefetch_playlist(
             Ok(()) => {}
             // Drop unfinished requests but keep completed cache files. The caller
             // can now try FFmpeg and its alternative playlists instead of failing.
-            Err(SegmentFailure::Network | SegmentFailure::RateLimited(_)) => return Ok(None),
+            Err(SegmentFailure::Network) => return Ok(None),
+            Err(SegmentFailure::RateLimited(_)) => return Err(
+                "The media server kept returning HTTP 429 after waiting and retrying. Cached fragments are preserved. Wait before using Resume / retry.".into()
+            ),
             Err(SegmentFailure::Local(error)) => return Err(error),
         }
         completed += 1;
@@ -701,7 +721,8 @@ mod tests {
         assert!(segment_retry_delay(&SegmentFailure::RateLimited(None), 1).is_some());
         // But it cannot retry forever, otherwise a hard limit never surfaces.
         assert!(segment_retry_delay(&SegmentFailure::RateLimited(None), 2).is_some());
-        assert!(segment_retry_delay(&SegmentFailure::RateLimited(None), 5).is_none());
+        assert!(segment_retry_delay(&SegmentFailure::RateLimited(None), 5).is_some());
+        assert!(segment_retry_delay(&SegmentFailure::RateLimited(None), 11).is_none());
         // Rate limiting waits longer than a plain transport hiccup.
         assert!(
             segment_retry_delay(&SegmentFailure::RateLimited(None), 0)
@@ -906,6 +927,11 @@ mod integration_tests {
         assert!(start.elapsed() >= Duration::from_secs(1));
         assert_eq!(fixture.requests.load(Ordering::Relaxed), 2);
         assert!(prepared.playlist.is_file());
+        assert!(prepared.playlist.parent().unwrap().join(".rate-limited").is_file());
+        // A resumed job must use its completed cache without another HTTP request.
+        prepare(&Client::new(), &fixture.url.join("limited.m3u8").unwrap(),
+            &target, &HashMap::new(), None, &mut |_| Ok(())).await.unwrap().unwrap();
+        assert_eq!(fixture.requests.load(Ordering::Relaxed), 2);
         prepared.cleanup().await;
         let _ = fs::remove_dir_all(target.parent().unwrap()).await;
     }
