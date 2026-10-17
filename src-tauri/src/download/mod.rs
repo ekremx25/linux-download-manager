@@ -625,7 +625,11 @@ impl DownloadService {
         }
 
         if stream_manifest || looks_like_stream_manifest_url(&url) {
-            if transfer.connections > 1 && !is_embedded_player_page(&url) {
+            if transfer.connections > 1
+                && !is_embedded_player_page(&url)
+                && !hls::prefers_own_prefetch(&self.client, &url, http_headers, source_page_url)
+                    .await
+            {
                 let options = YtdlpOptions {
                     format,
                     use_browser_cookies: false,
@@ -979,10 +983,55 @@ impl DownloadService {
                 if let Some(prepared) = &prepared {
                     command.arg(&prepared.playlist);
                     if let Some(audio_playlist) = prepared.audio_playlist.as_ref() {
-                        // Both tracks are already on disk; a local second input keeps the
-                        // per-input protocol options out of the muxer's way entirely.
-                        command.args(["-allowed_extensions", "ALL", "-f", "hls", "-i"]);
+                        // Both tracks are already on disk.
+                        command.args([
+                            "-f",
+                            "hls",
+                            "-allowed_segment_extensions",
+                            "ALL",
+                            "-extension_picky",
+                            "0",
+                            "-allowed_extensions",
+                            "ALL",
+                            "-i",
+                        ]);
                         command.arg(audio_playlist);
+                        command.args(["-map", "0:v?", "-map", "1:a?"]);
+                    } else if let Some(audio_url) = prepared.audio_url.as_ref() {
+                        // Only the video was prefetched. The separate audio rendition is
+                        // read remotely, so this input needs the same network options.
+                        command.args([
+                            "-user_agent",
+                            user_agent,
+                            "-reconnect",
+                            "1",
+                            "-reconnect_streamed",
+                            "1",
+                            "-reconnect_delay_max",
+                            "5",
+                        ]);
+                        if let Some(referer) = referer.as_ref() {
+                            command.arg("-referer").arg(referer.as_str());
+                        }
+                        if !forwarded_headers.is_empty() {
+                            command.arg("-headers").arg(&forwarded_headers);
+                        }
+                        command.args([
+                            "-f",
+                            "hls",
+                            "-allowed_segment_extensions",
+                            "ALL",
+                            "-extension_picky",
+                            "0",
+                            "-seg_max_retry",
+                            "5",
+                            "-allowed_extensions",
+                            "ALL",
+                            "-rw_timeout",
+                            "15000000",
+                            "-i",
+                        ]);
+                        command.arg(audio_url.as_str());
                         command.args(["-map", "0:v?", "-map", "1:a?"]);
                     } else {
                         command.args(["-map", "0:v?", "-map", "0:a?"]);
