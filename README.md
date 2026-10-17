@@ -13,6 +13,16 @@
   <a href="#troubleshooting">Help</a>
 </p>
 
+## Latest release — v0.2.6
+
+**The current version is available on the `main` branch and as ready-to-use Linux packages.**
+
+[**Download AppImage**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.6/Linux_Download_Manager-0.2.6-x86_64.AppImage) · [**Download installer**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.6/LinuxDownloadManager-0.2.6-linux-x86_64.tar.gz) · [Release notes](https://github.com/ekremx25/linux-download-manager/releases/tag/v0.2.6)
+
+This update fetches separate HLS video and audio alongside each other, merges them into one file, and avoids a redundant preliminary video download for supported separate-audio playlists. Audio requests are paced to reduce server rate-limit failures; transfer speed still depends on the provider.
+
+Choose **AppImage** for a portable application or **installer** for desktop installation. Both packages target **Linux x86_64**.
+
 ## Install
 
 **Current release: v0.2.6 · Linux x86_64**
