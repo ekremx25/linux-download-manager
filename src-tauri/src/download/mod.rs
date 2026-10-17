@@ -541,7 +541,7 @@ impl DownloadService {
                 .map_err(|error| format!("failed to create target directory: {error}"))?;
         }
 
-        if force_ytdlp || transfer.audio_language.is_some() {
+        if force_ytdlp || transfer.audio_language.is_some() || transfer.max_height > 0 {
             let media_url = resolve_ytdlp_source(&url, source_page_url).unwrap_or_else(|| url.clone());
             return self
                 .download_with_ytdlp(
@@ -625,28 +625,10 @@ impl DownloadService {
         }
 
         if stream_manifest || looks_like_stream_manifest_url(&url) {
-            if transfer.connections > 1 && !is_embedded_player_page(&url) {
-                let options = YtdlpOptions {
-                    format,
-                    use_browser_cookies: false,
-                    transfer: &transfer,
-                    bandwidth_limit_kbps,
-                    http_headers: Some(http_headers),
-                };
-                if let Ok(result) = self
-                    .download_with_ytdlp(
-                        &url,
-                        target_path,
-                        options,
-                        &mut on_started,
-                        &mut on_progress,
-                    )
-                    .await
-                {
-                    return Ok(result);
-                }
-                let _ = fs::remove_file(media_progress_path(target_path)).await;
-            }
+            let _ = fs::remove_file(media_progress_path(target_path)).await;
+            // The native HLS cache handles parallel video + audio directly.
+            // Trying yt-dlp first could finish video, fail audio, then download
+            // the entire movie again through the fallback.
             let mut playlist_urls = vec![url.clone()];
             for candidate in fallback_urls {
                 if let Ok(candidate_url) = validate_url(candidate)
@@ -983,7 +965,7 @@ impl DownloadService {
                         // per-input protocol options out of the muxer's way entirely.
                         command.args(["-allowed_extensions", "ALL", "-f", "hls", "-i"]);
                         command.arg(audio_playlist);
-                        command.args(["-map", "0:v?", "-map", "1:a?"]);
+                        command.args(["-map", "0:v?", "-map", "1:a:0"]);
                     } else {
                         command.args(["-map", "0:v?", "-map", "0:a?"]);
                     }
@@ -1038,7 +1020,9 @@ impl DownloadService {
                                 .await
                                 .map(|metadata| metadata.len())
                                 .unwrap_or(0);
-                            on_progress(DownloadProgress::bytes(downloaded_bytes, None, 1))?;
+                            if prepared.is_none() {
+                                on_progress(DownloadProgress::bytes(downloaded_bytes, None, 1))?;
+                            }
                             tokio::time::sleep(Duration::from_millis(300)).await;
                         }
                         Err(error) => {

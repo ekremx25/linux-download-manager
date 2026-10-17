@@ -65,10 +65,13 @@ Run as your normal user. The installer requests `sudo` for system dependencies a
 
 ## Unreleased fixes
 
-- Preserve separate HLS audio renditions by passing the complete master playlist
-  to FFmpeg. These sources use the compatibility path; self-contained HLS keeps
-  parallel downloads. Segment filenames no longer cause audio fragments to be
-  discarded. Previously downloaded silent files need to be downloaded again.
+- Cache supported separate HLS video and audio tracks before merging: video uses
+  parallel transfers, while audio uses one worker to reduce rate limiting. Audio
+  failures preserve cached fragments for retry. Unsupported manifests still use
+  FFmpeg. Segment filenames no longer cause audio fragments to be discarded.
+- Direct HLS transfers no longer run a separate yt-dlp download first. Progress
+  reaches 100% only after the output is finalized. Previously downloaded silent
+  files need to be downloaded again.
 
 ## What's new in v0.2.5
 
