@@ -120,26 +120,17 @@ fn parse(text: &str, base: &Url) -> Option<(String, Vec<Url>)> {
             if !matches!(url.scheme(), "http" | "https") {
                 return None;
             }
-            // Skip f2 (audio) segments — the CDN rate-limits them to 429.
-            // FFmpeg handles audio via the separate audio stream URL.
-            if line.contains("-f2-") {
-                // Write placeholder so the preceding EXTINF is also removed by filter below.
-                local.push_str("#EXTINF:SKIP\n");
-                duration_pending = false;
-                continue;
-            }
             local.push_str(&format!("segment-{}.ts\n", urls.len()));
             urls.push(url);
             duration_pending = false;
         }
     }
-    // Remove #EXTINF:SKIP placeholder lines that were written for f2 audio segments.
-    let local: String = local.lines().filter(|l| *l != "#EXTINF:SKIP").collect::<Vec<_>>().join("\n");
     (!urls.is_empty() && !duration_pending).then_some((local, urls))
 }
 
 // Only self-contained renditions can be prefetched as one media playlist.
 // Separate audio/subtitles and unknown master features stay with FFmpeg.
+// Passing only a video child playlist would discard its master's audio group.
 fn master_variant(text: &str, base: &Url) -> Option<Url> {
     if !text.trim_start().starts_with("#EXTM3U") {
         return None;
@@ -152,9 +143,10 @@ fn master_variant(text: &str, base: &Url) -> Option<Url> {
                 return None;
             }
             let fields: Vec<_> = attrs.split(',').map(str::trim).collect();
-            // AUDIO= is prefetchable: both tracks are downloaded in parallel and muxed.
+            // Keep rendition groups on the original master so FFmpeg sees all tracks.
             if fields.iter().any(|f| {
-                f.starts_with("VIDEO=")
+                f.starts_with("AUDIO=")
+                    || f.starts_with("VIDEO=")
                     || f.starts_with("SUBTITLES=")
                     || f.starts_with("CLOSED-CAPTIONS=\"")
             }) {
@@ -174,7 +166,6 @@ fn master_variant(text: &str, base: &Url) -> Option<Url> {
                 "#EXTM3U",
                 "#EXT-X-VERSION",
                 "#EXT-X-INDEPENDENT-SEGMENTS",
-                "#EXT-X-MEDIA",
                 "#EXT-X-I-FRAME-STREAM-INF",
             ]
             .contains(&line.split(':').next()?)
@@ -197,27 +188,6 @@ fn master_variant(text: &str, base: &Url) -> Option<Url> {
         .into_iter()
         .max_by_key(|(bandwidth, _)| *bandwidth)
         .map(|(_, url)| url)
-}
-
-// The default rendition of the master's AUDIO group.
-fn master_audio_variant(text: &str, base: &Url) -> Option<Url> {
-    let mut fallback = None;
-    for line in text.lines().map(str::trim) {
-        let Some(attrs) = line.strip_prefix("#EXT-X-MEDIA:TYPE=AUDIO,") else {
-            continue;
-        };
-        let value = attrs.split_once("URI=\"").map(|(_, rest)| rest)?;
-        let end = value.find('"')?;
-        let url = base.join(&value[..end]).ok()?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return None;
-        }
-        if attrs.contains("DEFAULT=YES") {
-            return Some(url);
-        }
-        fallback.get_or_insert(url);
-    }
-    fallback
 }
 
 async fn fetch_playlist(
@@ -325,7 +295,6 @@ pub(super) async fn prepare_parallel(
     let mut next = url.clone();
     let mut visited = std::collections::HashSet::new();
     let mut media = None;
-    let mut audio_url = None;
     for _ in 0..4 {
         if !visited.insert(next.clone()) {
             return Ok(None);
@@ -340,7 +309,6 @@ pub(super) async fn prepare_parallel(
         let Some(variant) = master_variant(&text, &base) else {
             return Ok(None);
         };
-        audio_url = master_audio_variant(&text, &base);
         next = variant;
     }
     let Some((base, text, _, _)) = media else {
@@ -354,11 +322,8 @@ pub(super) async fn prepare_parallel(
     else {
         return Ok(None);
     };
-    // NOTE: audio streams are left to FFmpeg.  When a CDN limits the audio
-    // playlist (e.g. Rapidrame returns 429 only on audio segments), skipping
-    // parallel prefetch here prevents the audio track from starving the video
-    // track — FFmpeg downloads audio sequentially but the audio track is tiny
-    // (~2 MB) so the slowdown is negligible compared to a full 429 collapse.
+    // Only self-contained playlists reach this point. Masters with rendition
+    // groups fall back before prefetch, retaining their audio relationship.
     let audio_playlist = None;
     Ok(Some(Prepared {
         playlist,
@@ -386,7 +351,7 @@ async fn prefetch_playlist(
         return Ok(None);
     };
     // Completed segments are reusable only for the exact same playlist and URL.
-    let fingerprint = format!("{:x}", Sha256::digest(format!("{base}\n{text}")));
+    let fingerprint = format!("{:x}", Sha256::digest(format!("all-segments-v2\n{base}\n{text}")));
     let folder = cache.join(fingerprint);
     fs::create_dir_all(&folder)
         .await
@@ -527,6 +492,17 @@ async fn prefetch_playlist(
 mod tests {
     use super::*;
     #[test]
+    fn audio_named_segments_are_never_discarded() {
+        let base = Url::parse("https://example.com/media.m3u8").unwrap();
+        let text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\npart-f2-1.ts\n#EXTINF:1,\npart-f2-2.ts\n#EXT-X-ENDLIST\n";
+        let (local, urls) = parse(text, &base).unwrap();
+        assert_eq!(urls.len(), 2);
+        assert!(urls[0].path().ends_with("part-f2-1.ts"));
+        assert_eq!(local.matches("#EXTINF:").count(), 2);
+        assert!(local.contains("segment-0.ts\n"));
+        assert!(local.contains("segment-1.ts\n"));
+    }
+    #[test]
     fn master_selection_preserves_external_tracks_and_rejects_unsafe_sources() {
         let base = Url::parse("https://example.com/hls/master").unwrap();
         let text = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100\nlow/list.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=200,CODECS=\"avc1,mp4a\"\nhigh/list.m3u8\n";
@@ -534,20 +510,15 @@ mod tests {
             master_variant(text, &base).unwrap().as_str(),
             "https://example.com/hls/high/list.m3u8"
         );
-        // AUDIO= is prefetched now: the video variant is downloaded in parallel and the
-        // master's default audio rendition is muxed from its own local playlist.
         let grouped = text.replace("BANDWIDTH=100", "BANDWIDTH=100,AUDIO=\"group\"");
-        assert_eq!(
-            master_variant(&grouped, &base).unwrap().as_str(),
-            "https://example.com/hls/high/list.m3u8"
-        );
-        let with_audio = format!(
-            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"group\",DEFAULT=YES,URI=\"audio\"\n{grouped}"
-        );
-        assert_eq!(
-            master_audio_variant(&with_audio, &base).unwrap().as_str(),
-            "https://example.com/hls/audio"
-        );
+        assert!(master_variant(&grouped, &base).is_none());
+        for attributes in [
+            "TYPE=AUDIO,GROUP-ID=\"group\",DEFAULT=YES,URI=\"audio\"",
+            "URI=\"audio\",GROUP-ID=\"group\",TYPE=AUDIO",
+        ] {
+            let with_audio = text.replace("#EXTM3U", &format!("#EXTM3U\n#EXT-X-MEDIA:{attributes}"));
+            assert!(master_variant(&with_audio, &base).is_none());
+        }
         // Rendition groups the prefetcher cannot handle still belong to FFmpeg.
         assert!(
             master_variant(
@@ -674,6 +645,9 @@ mod integration_tests {
             Self::start_count(segment, 8)
         }
         fn start_count(segment: Vec<u8>, count: usize) -> Self {
+            Self::start_tracks(segment, None, count)
+        }
+        fn start_tracks(segment: Vec<u8>, audio: Option<Vec<u8>>, count: usize) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let url = Url::parse(&format!(
@@ -694,6 +668,7 @@ mod integration_tests {
                         continue;
                     };
                     let (r, a, p, segment) = (r.clone(), a.clone(), p.clone(), segment.clone());
+                    let audio = audio.clone();
                     workers.push(std::thread::spawn(move || {
                         socket
                             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -701,7 +676,13 @@ mod integration_tests {
                         let mut input = [0; 4096];
                         let n = socket.read(&mut input).unwrap_or(0);
                         let header = String::from_utf8_lossy(&input[..n]);
-                        let body = if header.starts_with("GET /unreachable.m3u8 ") {
+                        let body = if header.starts_with("GET /split.m3u8 ") {
+                            b"#EXTM3U\n#EXT-X-MEDIA:URI=\"audio.m3u8\",TYPE=AUDIO,GROUP-ID=\"sound\",NAME=\"Original\",DEFAULT=YES,AUTOSELECT=YES\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"sound\"\nmedia.m3u8\n".to_vec()
+                        } else if header.starts_with("GET /audio.m3u8 ") {
+                            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1,\nsegment-f2-0.ts\n#EXT-X-ENDLIST\n".to_vec()
+                        } else if header.starts_with("GET /segment-f2-0.ts ") {
+                            audio.unwrap_or_default()
+                        } else if header.starts_with("GET /unreachable.m3u8 ") {
                             b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nhttp://127.0.0.1:0/unreachable.ts\n#EXT-X-ENDLIST\n".to_vec()
                         } else if header.starts_with("GET /playlist.m3u8 ") {
                             b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nmedia.m3u8\n".to_vec()
@@ -874,6 +855,43 @@ mod integration_tests {
             "completed segments must be reused"
         );
         prepared.cleanup().await;
+        let _ = fs::remove_dir_all(target.parent().unwrap()).await;
+    }
+    #[tokio::test]
+    #[ignore = "requires installed FFmpeg; generated localhost media only"]
+    async fn separate_audio_master_produces_audible_mp4() {
+        let target = test_target("separate-audio");
+        let video = target.with_extension("video.ts");
+        let audio = target.with_extension("audio.ts");
+        for (filter, codec, output) in [
+            ("color=c=blue:s=160x90:r=25", "libx264", &video),
+            ("sine=frequency=440:sample_rate=44100", "aac", &audio),
+        ] {
+            let generated = Command::new("ffmpeg")
+                .args(["-v", "error", "-y", "-f", "lavfi", "-i", filter,
+                       "-t", "1", "-c", codec, "-threads", "1", "-f", "mpegts"])
+                .arg(output).output().unwrap();
+            assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+        }
+        let fixture = Fixture::start_tracks(fs::read(&video).await.unwrap(), Some(fs::read(&audio).await.unwrap()), 1);
+        let master = fixture.url.join("split.m3u8").unwrap();
+        assert!(prepare(&Client::new(), &master, &target, &HashMap::new(), None, &mut |_| Ok(())).await.unwrap().is_none());
+        assert_eq!(fixture.requests.load(Ordering::Relaxed), 0);
+        DownloadService::new(Client::new()).download_stream_manifest_to_path(
+            &[master], &target, super::super::StreamOptions {
+                source_page_url: None, http_headers: &HashMap::new(), transfer: &Default::default(),
+            }, &mut |_, _, _| Ok(()), &mut |_| Ok(()),
+        ).await.unwrap();
+        let probe = Command::new("ffprobe").args(["-v", "error", "-show_entries", "stream=codec_type", "-of", "json"]).arg(&target).output().unwrap();
+        assert!(probe.status.success());
+        let data: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
+        let tracks = data["streams"].as_array().unwrap();
+        assert!(tracks.iter().any(|s| s["codec_type"] == "video"));
+        assert!(tracks.iter().any(|s| s["codec_type"] == "audio"));
+        let decoded = Command::new("ffmpeg").args(["-v", "error", "-i"]).arg(&target)
+            .args(["-map", "0:a:0", "-f", "s16le", "-"]).output().unwrap();
+        assert!(decoded.status.success());
+        assert!(decoded.stdout.iter().any(|b| *b != 0), "audio must decode to non-silent samples");
         let _ = fs::remove_dir_all(target.parent().unwrap()).await;
     }
     #[tokio::test]

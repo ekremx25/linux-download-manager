@@ -63,6 +63,13 @@ Run as your normal user. The installer requests `sudo` for system dependencies a
 
 *Screenshots show example transfers. Colors follow your system theme; speeds depend on your network and the source server.*
 
+## Unreleased fixes
+
+- Preserve separate HLS audio renditions by passing the complete master playlist
+  to FFmpeg. These sources use the compatibility path; self-contained HLS keeps
+  parallel downloads. Segment filenames no longer cause audio fragments to be
+  discarded. Previously downloaded silent files need to be downloaded again.
+
 ## What's new in v0.2.5
 
 - **Recovery from unreachable CDN addresses.** If an HLS fragment connection fails, LDM can retry using an independent DNS answer instead of immediately abandoning parallel downloads.
