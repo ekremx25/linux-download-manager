@@ -13,31 +13,31 @@
   <a href="#troubleshooting">Help</a>
 </p>
 
-## Latest release — v0.2.6
+## Latest release — v0.2.7
 
 **The current version is available on the `main` branch and as ready-to-use Linux packages.**
 
-[**Download AppImage**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.6/Linux_Download_Manager-0.2.6-x86_64.AppImage) · [**Download installer**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.6/LinuxDownloadManager-0.2.6-linux-x86_64.tar.gz) · [Release notes](https://github.com/ekremx25/linux-download-manager/releases/tag/v0.2.6)
+[**Download AppImage**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.7/Linux_Download_Manager-0.2.7-x86_64.AppImage) · [**Download installer**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.7/LinuxDownloadManager-0.2.7-linux-x86_64.tar.gz) · [Release notes](https://github.com/ekremx25/linux-download-manager/releases/tag/v0.2.7)
 
-This update fetches separate HLS video and audio alongside each other, merges them into one file, and avoids a redundant preliminary video download for supported separate-audio playlists. Audio requests are paced to reduce server rate-limit failures; transfer speed still depends on the provider.
+This update keeps large segmented downloads running on slower connections: a connection is only dropped when the server stops sending, a connection that drops after making progress resumes without failing the download, and finished parts are merged faster.
 
 Choose **AppImage** for a portable application or **installer** for desktop installation. Both packages target **Linux x86_64**.
 
 ## Install
 
-**Current release: v0.2.6 · Linux x86_64**
+**Current release: v0.2.7 · Linux x86_64**
 
 | Package | Download | How to launch |
 | --- | --- | --- |
-| Portable AppImage | [Linux_Download_Manager-0.2.6-x86_64.AppImage](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.6/Linux_Download_Manager-0.2.6-x86_64.AppImage) | Make executable, then open it. |
-| Desktop installer | [LinuxDownloadManager-0.2.6-linux-x86_64.tar.gz](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.6/LinuxDownloadManager-0.2.6-linux-x86_64.tar.gz) | Extract, then run `Install.desktop` or `bash Install.sh`. |
-| Checksums | [SHA256SUMS](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.6/SHA256SUMS) | Run `sha256sum --ignore-missing -c SHA256SUMS` beside your download. |
+| Portable AppImage | [Linux_Download_Manager-0.2.7-x86_64.AppImage](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.7/Linux_Download_Manager-0.2.7-x86_64.AppImage) | Make executable, then open it. |
+| Desktop installer | [LinuxDownloadManager-0.2.7-linux-x86_64.tar.gz](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.7/LinuxDownloadManager-0.2.7-linux-x86_64.tar.gz) | Extract, then run `Install.desktop` or `bash Install.sh`. |
+| Checksums | [SHA256SUMS](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.7/SHA256SUMS) | Run `sha256sum --ignore-missing -c SHA256SUMS` beside your download. |
 
 ### AppImage
 
 ```bash
-chmod +x Linux_Download_Manager-0.2.6-x86_64.AppImage
-./Linux_Download_Manager-0.2.6-x86_64.AppImage
+chmod +x Linux_Download_Manager-0.2.7-x86_64.AppImage
+./Linux_Download_Manager-0.2.7-x86_64.AppImage
 ```
 
 Keep the AppImage in a permanent location, such as `~/Applications`: browser integration and desktop autostart use its path. If FUSE is unavailable, launch with `--appimage-extract-and-run`.
@@ -72,6 +72,20 @@ Run as your normal user. The installer requests `sudo` for system dependencies a
 ![Download details with individual connections and transfer progress](docs/images/download-details.png)
 
 *Screenshots show example transfers. Colors follow your system theme; speeds depend on your network and the source server.*
+
+## What's new in v0.2.7
+
+- **Large downloads are no longer cut every two minutes.** Each segment used a
+  120-second total timeout, so on an ordinary connection segments of a
+  multi-gigabyte file were cut repeatedly and the download could fail. A
+  connection is now dropped only after 30 seconds without data.
+- **Dropped connections resume instead of failing.** A segment that made
+  progress before its connection dropped keeps its retry attempts.
+- **Faster merging.** Finished parts are merged with an in-kernel copy, about
+  three times faster for a 2 GB file in local tests.
+
+Source-server limits still apply; this update does not guarantee a particular
+transfer speed on every site.
 
 ## What's new in v0.2.6
 

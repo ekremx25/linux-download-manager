@@ -2152,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "linux-download-manager-custom"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "chrono",
  "futures-util",

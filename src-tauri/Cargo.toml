@@ -1,6 +1,6 @@
 [package]
 name = "linux-download-manager-custom"
-version = "0.2.6"
+version = "0.2.7"
 license = "MIT"
 description = "Linux-first IDM-inspired download manager desktop app (Custom UI)"
 edition = "2024"
