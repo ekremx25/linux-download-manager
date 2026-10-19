@@ -47,6 +47,15 @@ const SEGMENT_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 /// routinely drop some of several parallel range connections.
 const SEGMENT_MAX_ATTEMPTS: u32 = 3;
 const SEGMENT_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
+/// A range request is only abandoned when the server stops sending, never because
+/// a large segment simply takes long. A total request timeout used to cut every
+/// segment that needed more than two minutes, which on a normal connection is
+/// any segment of a multi-gigabyte file.
+const SEGMENT_IDLE_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(30)
+};
 const DYNAMIC_SPLIT_MIN_REMAINING: u64 = 2 * 1024 * 1024;
 /// Used when the browser extension captured no User-Agent for a media request.
 const FALLBACK_MEDIA_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -1522,14 +1531,17 @@ impl DownloadService {
             if start > segment.end {
                 return Ok(());
             }
-            let response = self
+            let request = self
                 .client
                 .get(url.clone())
                 .header("Accept-Encoding", "identity")
                 .header(RANGE, format!("bytes={start}-{}", segment.end))
-                .timeout(Duration::from_secs(120))
-                .send()
+                .send();
+            let response = tokio::time::timeout(SEGMENT_IDLE_TIMEOUT, request)
                 .await
+                .map_err(|_| {
+                    SegmentFailure::Retry("Server did not respond".into(), Duration::ZERO, false)
+                })?
                 .map_err(|e| SegmentFailure::Retry(e.to_string(), Duration::ZERO, false))?;
             let code = response.status().as_u16();
             if code == 200 {
@@ -1583,7 +1595,15 @@ impl DownloadService {
                         }
                         continue;
                     }
-                    next = stream.next() => next,
+                    next = tokio::time::timeout(SEGMENT_IDLE_TIMEOUT, stream.next()) => next,
+                };
+                let Ok(next) = next else {
+                    file.flush().await.map_err(|e| SegmentFailure::Fatal(e.to_string()))?;
+                    return Err(SegmentFailure::Retry(
+                        "Connection stalled".into(),
+                        Duration::ZERO,
+                        false,
+                    ));
                 };
                 let Some(chunk) = next else { break };
                 let chunk = chunk
@@ -1684,6 +1704,10 @@ impl DownloadService {
             .filter_map(|(i, (_, done))| if *done { None } else { Some(i) })
             .collect();
         let mut attempts = vec![0u32; manifest.segments.len()];
+        // Bytes on disk when each segment's current request started. A request that
+        // moved the segment forward before failing was a dropped connection, not a
+        // failing server, so it does not use up the segment's attempts.
+        let mut started_at = vec![0u64; manifest.segments.len()];
         let mut limit = max_parallel.min(manifest.segments.len());
         let mut split_signals: HashMap<usize, watch::Sender<bool>> = HashMap::new();
         let mut split_in_progress = false;
@@ -1695,6 +1719,7 @@ impl DownloadService {
             while futures.len() < limit && Instant::now() >= ready_at {
                 let Some(i) = pending.pop_front() else { break };
                 attempts[i] += 1;
+                started_at[i] = self.segment_progress_on_disk(target_path, &manifest.segments[i]).await.0;
                 let (split_tx, split_rx) = watch::channel(false);
                 split_signals.insert(i, split_tx);
                 futures.push(self.fetch_segment(
@@ -1727,6 +1752,7 @@ impl DownloadService {
                             if let Some(new_indexes) = split_remaining_segment(&mut manifest, i, on_disk, limit.saturating_sub(futures.len())) {
                                 self.save_segment_manifest(target_path, &manifest).await?;
                                 attempts.resize(manifest.segments.len(), 0);
+                                started_at.resize(manifest.segments.len(), 0);
                                 for new_index in new_indexes {
                                     pending.push_back(new_index);
                                 }
@@ -1736,6 +1762,8 @@ impl DownloadService {
                         }
                         Err(SegmentFailure::RangeIgnored) => {fallback=true; break;}
                         Err(SegmentFailure::Retry(message, delay, throttled)) => {
+                            let (on_disk, _) = self.segment_progress_on_disk(target_path, &manifest.segments[i]).await;
+                            if on_disk > started_at[i] { attempts[i] = 1; }
                             if attempts[i] >= SEGMENT_MAX_ATTEMPTS {failure=Some(message); break;}
                             if throttled { limit = (limit/2).max(1); }
                             let backoff = SEGMENT_RETRY_BASE_DELAY * (1u32 << (attempts[i]-1));
@@ -1787,19 +1815,16 @@ impl DownloadService {
         }
 
         let temp_path = self.partial_path_for(target_path);
-        let mut output = fs::File::create(&temp_path)
-            .await
-            .map_err(|error| format!("failed to create merged output: {error}"))?;
-
         let mut ordered_segments: Vec<_> = manifest.segments.iter().collect();
         ordered_segments.sort_by_key(|segment| segment.start);
+        // Every segment is checked before anything moves, so a short part file
+        // reports an error without consuming the parts that were fine.
+        let mut parts = Vec::with_capacity(ordered_segments.len());
         for segment in ordered_segments {
-            let seg_path = self.segment_path_for(target_path, segment.index);
             let (on_disk, complete) = self.segment_progress_on_disk(target_path, segment).await;
             if !complete {
                 // Report which segment is short instead of a bare open error,
                 // so a truncated or externally removed part file is actionable.
-                let _ = fs::remove_file(&temp_path).await;
                 return Err(format!(
                     "failed to open segment for merging: segment {} has {} of {} bytes on disk",
                     segment.index,
@@ -1807,19 +1832,12 @@ impl DownloadService {
                     segment.end.saturating_sub(segment.start).saturating_add(1)
                 ));
             }
-            let mut seg_file = fs::File::open(&seg_path)
-                .await
-                .map_err(|error| format!("failed to open segment for merging: {error}"))?;
-            tokio::io::copy(&mut seg_file, &mut output)
-                .await
-                .map_err(|error| format!("failed to merge segment: {error}"))?;
-            let _ = fs::remove_file(&seg_path).await;
+            parts.push(self.segment_path_for(target_path, segment.index));
         }
-
-        output
-            .flush()
+        let merge_target = temp_path.clone();
+        tokio::task::spawn_blocking(move || merge_segment_files(&parts, &merge_target))
             .await
-            .map_err(|error| format!("failed to flush merged output: {error}"))?;
+            .map_err(|error| format!("failed to merge segments: {error}"))??;
 
         fs::rename(&temp_path, target_path)
             .await
@@ -1831,6 +1849,31 @@ impl DownloadService {
         let final_bytes = downloaded.load(Ordering::Relaxed);
         Ok((final_bytes, Some(total_bytes), manifest.segments.len()))
     }
+}
+
+/// Joins finished segments into `output`. The first part becomes the output by
+/// rename, and the others are appended with std::io::copy, which Linux turns into
+/// an in-kernel copy_file_range; a multi-gigabyte file no longer streams through
+/// small userspace buffers while the UI waits on "assembling".
+fn merge_segment_files(parts: &[PathBuf], output: &Path) -> Result<(), String> {
+    let Some((first, rest)) = parts.split_first() else {
+        return Err("no segments to merge".into());
+    };
+    let _ = std::fs::remove_file(output);
+    std::fs::rename(first, output)
+        .map_err(|error| format!("failed to create merged output: {error}"))?;
+    let mut merged = std::fs::OpenOptions::new()
+        .append(true)
+        .open(output)
+        .map_err(|error| format!("failed to create merged output: {error}"))?;
+    for part in rest {
+        let mut source = std::fs::File::open(part)
+            .map_err(|error| format!("failed to open segment for merging: {error}"))?;
+        std::io::copy(&mut source, &mut merged)
+            .map_err(|error| format!("failed to merge segment: {error}"))?;
+        let _ = std::fs::remove_file(part);
+    }
+    Ok(())
 }
 
 enum SegmentFailure {
@@ -3244,6 +3287,141 @@ mod segment_tests {
         });
 
         (addr, attempts)
+    }
+
+    /// Serves one range request per connection in small chunks `delay` apart.
+    /// The first connection can stall after a few bytes and then hold the socket
+    /// open without sending anything, the way an overloaded mirror does.
+    async fn spawn_paced_range_server(
+        body_len: usize,
+        delay: Duration,
+        stall_first: bool,
+    ) -> (std::net::SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                let seen = observed.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buffer = [0u8; 1024];
+                    loop {
+                        let Ok(read) = socket.read(&mut buffer).await else { return };
+                        if read == 0 { return; }
+                        request.extend_from_slice(&buffer[..read]);
+                        if request.windows(4).any(|window| window == b"\r\n\r\n") { break; }
+                    }
+                    let text = String::from_utf8_lossy(&request).to_lowercase();
+                    let Some((start, end)) = text.lines()
+                        .find_map(|line| line.strip_prefix("range: bytes="))
+                        .and_then(|value| value.trim().split_once('-'))
+                        .and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))) else { return };
+                    let header = format!("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{body_len}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", end - start + 1);
+                    if socket.write_all(header.as_bytes()).await.is_err() { return; }
+                    let mut offset = start;
+                    while offset <= end {
+                        let next = (offset + 1024).min(end + 1);
+                        let body: Vec<u8> = (offset..next).map(|n| (n % 251) as u8).collect();
+                        if socket.write_all(&body).await.is_err() { return; }
+                        offset = next;
+                        if seen == 0 && stall_first {
+                            tokio::time::sleep(Duration::from_secs(600)).await;
+                        }
+                        tokio::time::sleep(delay).await;
+                    }
+                });
+            }
+        });
+        (addr, requests, server)
+    }
+
+    #[tokio::test]
+    async fn slow_steady_segment_is_not_cut_by_a_total_timeout() {
+        let dir = TestDir::new();
+        let target = dir.target();
+        // 24 chunks 200 ms apart: the transfer takes ~5 s, more than twice the
+        // idle timeout, while no single gap comes close to it.
+        let body_len = 24 * 1024;
+        let (addr, requests, server) =
+            spawn_paced_range_server(body_len, Duration::from_millis(200), false).await;
+        let service = DownloadService::new(Client::new());
+        let url = Url::parse(&format!("http://{addr}/file.bin")).unwrap();
+        let result = service.download_with_segments(
+            &url, &target, build_segment_manifest_with_count(body_len as u64, 1),
+            1, None, &mut |_, _, _| Ok(()), &mut |_| Ok(())
+        ).await;
+        server.abort();
+        assert!(result.is_ok(), "slow download failed: {:?}", result.err());
+        assert_eq!(requests.load(Ordering::SeqCst), 1, "a steady transfer must not reconnect");
+        let bytes = fs::read(&target).await.unwrap();
+        assert!(bytes.iter().enumerate().all(|(i, byte)| *byte == (i % 251) as u8));
+    }
+
+    #[tokio::test]
+    async fn stalled_connection_is_dropped_and_resumed() {
+        let dir = TestDir::new();
+        let target = dir.target();
+        let body_len = 8 * 1024;
+        let (addr, requests, server) =
+            spawn_paced_range_server(body_len, Duration::ZERO, true).await;
+        let service = DownloadService::new(Client::new());
+        let url = Url::parse(&format!("http://{addr}/file.bin")).unwrap();
+        let started = Instant::now();
+        let result = service.download_with_segments(
+            &url, &target, build_segment_manifest_with_count(body_len as u64, 1),
+            1, None, &mut |_, _, _| Ok(()), &mut |_| Ok(())
+        ).await;
+        server.abort();
+        assert!(result.is_ok(), "stalled download failed: {:?}", result.err());
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert!(started.elapsed() < Duration::from_secs(10), "stall was not detected");
+        let bytes = fs::read(&target).await.unwrap();
+        assert_eq!(bytes.len(), body_len);
+        assert!(bytes.iter().enumerate().all(|(i, byte)| *byte == (i % 251) as u8));
+    }
+
+    #[tokio::test]
+    async fn segment_that_keeps_progressing_outlasts_the_attempt_limit() {
+        let dir = TestDir::new();
+        let target = dir.target();
+        let body_len = 200;
+        // Every dropped connection still delivered 7 bytes first.
+        let drops = SEGMENT_MAX_ATTEMPTS as usize + 3;
+        let (addr, attempts) = spawn_range_server(body_len, drops).await;
+        let service = DownloadService::new(Client::new());
+        let url = Url::parse(&format!("http://{addr}/file.bin")).unwrap();
+        let result = service.download_with_segments(
+            &url, &target, build_segment_manifest_with_count(body_len as u64, 1),
+            1, None, &mut |_, _, _| Ok(()), &mut |_| Ok(())
+        ).await;
+        assert!(result.is_ok(), "progressing segment gave up: {:?}", result.err());
+        assert_eq!(attempts.load(Ordering::SeqCst), drops + 1);
+        let bytes = fs::read(&target).await.unwrap();
+        assert!(bytes.iter().enumerate().all(|(i, byte)| *byte == (i % 251) as u8));
+    }
+
+    #[test]
+    fn merge_keeps_segment_order_and_removes_parts() {
+        let dir = TestDir::new();
+        let root = dir.target().with_file_name("merge");
+        std::fs::create_dir_all(&root).unwrap();
+        let parts: Vec<_> = ["first", "second", "third"]
+            .iter()
+            .map(|name| {
+                let path = root.join(name);
+                std::fs::write(&path, name).unwrap();
+                path
+            })
+            .collect();
+        let output = root.join("out.part");
+        std::fs::write(&output, b"stale").unwrap();
+        merge_segment_files(&parts, &output).unwrap();
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), "firstsecondthird");
+        assert!(parts.iter().all(|part| !part.exists()));
     }
 
     #[tokio::test]
