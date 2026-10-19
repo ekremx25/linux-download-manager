@@ -217,7 +217,7 @@ Run `./uninstall.sh` from the installer/source directory to remove an installed 
 | No video button | Reload the extension, refresh the page and start the video. |
 | Stream not detected | Wait for the main video to play; refresh the page if the player changed. |
 | Unknown size | Some streams do not publish a reliable total. Check received bytes and speed; an unknown total alone does not mean the transfer failed. |
-| Slow or stalled HLS transfer | Update to v0.2.5 for connection-error DNS recovery. Check speed limits and source availability; adding connections cannot guarantee higher speed. |
+| Slow or stalled HLS transfer | Update to the latest release for connection-error DNS recovery and stall-tolerant segments. Check speed limits and source availability; adding connections cannot guarantee higher speed. |
 | 429 Too Many Requests | The server is limiting requests. Wait and avoid simultaneous downloads from that source. |
 | Incomplete video error | Some fragments were unreachable. Capture a fresh stream and retry; LDM will not mark the shortened output as complete. |
 | Unsupported URL | The captured link may be a player page rather than its media stream. Reload the extension and play the video before capturing again. |
