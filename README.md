@@ -13,31 +13,31 @@
   <a href="#troubleshooting">Help</a>
 </p>
 
-## Latest release — v0.2.8
+## Latest release — v0.2.9
 
 **The current version is available on the `main` branch and as ready-to-use Linux packages.**
 
-[**Download AppImage**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.8/Linux_Download_Manager-0.2.8-x86_64.AppImage) · [**Download installer**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.8/LinuxDownloadManager-0.2.8-linux-x86_64.tar.gz) · [Release notes](https://github.com/ekremx25/linux-download-manager/releases/tag/v0.2.8)
+[**Download AppImage**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.9/Linux_Download_Manager-0.2.9-x86_64.AppImage) · [**Download installer**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.9/LinuxDownloadManager-0.2.9-linux-x86_64.tar.gz) · [Release notes](https://github.com/ekremx25/linux-download-manager/releases/tag/v0.2.9)
 
-This update fixes downloads that stalled at 99%: when a download had been split into many parts, its last part could be restarted over and over instead of finishing. Large segmented downloads also keep running on slower connections and merge faster.
+This update adds the LDM download button to YouTube Shorts, follows the active Short as you scroll, and allows Shorts downloads when selected audio-language metadata is unavailable. It also includes the previous 99% stall fix.
 
 Choose **AppImage** for a portable application or **installer** for desktop installation. Both packages target **Linux x86_64**.
 
 ## Install
 
-**Current release: v0.2.8 · Linux x86_64**
+**Current release: v0.2.9 · Linux x86_64**
 
 | Package | Download | How to launch |
 | --- | --- | --- |
-| Portable AppImage | [Linux_Download_Manager-0.2.8-x86_64.AppImage](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.8/Linux_Download_Manager-0.2.8-x86_64.AppImage) | Make executable, then open it. |
-| Desktop installer | [LinuxDownloadManager-0.2.8-linux-x86_64.tar.gz](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.8/LinuxDownloadManager-0.2.8-linux-x86_64.tar.gz) | Extract, then run `Install.desktop` or `bash Install.sh`. |
-| Checksums | [SHA256SUMS](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.8/SHA256SUMS) | Run `sha256sum --ignore-missing -c SHA256SUMS` beside your download. |
+| Portable AppImage | [Linux_Download_Manager-0.2.9-x86_64.AppImage](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.9/Linux_Download_Manager-0.2.9-x86_64.AppImage) | Make executable, then open it. |
+| Desktop installer | [LinuxDownloadManager-0.2.9-linux-x86_64.tar.gz](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.9/LinuxDownloadManager-0.2.9-linux-x86_64.tar.gz) | Extract, then run `Install.desktop` or `bash Install.sh`. |
+| Checksums | [SHA256SUMS](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.9/SHA256SUMS) | Run `sha256sum --ignore-missing -c SHA256SUMS` beside your download. |
 
 ### AppImage
 
 ```bash
-chmod +x Linux_Download_Manager-0.2.8-x86_64.AppImage
-./Linux_Download_Manager-0.2.8-x86_64.AppImage
+chmod +x Linux_Download_Manager-0.2.9-x86_64.AppImage
+./Linux_Download_Manager-0.2.9-x86_64.AppImage
 ```
 
 Keep the AppImage in a permanent location, such as `~/Applications`: browser integration and desktop autostart use its path. If FUSE is unavailable, launch with `--appimage-extract-and-run`.
@@ -72,6 +72,13 @@ Run as your normal user. The installer requests `sudo` for system dependencies a
 ![Download details with individual connections and transfer progress](docs/images/download-details.png)
 
 *Screenshots show example transfers. Colors follow your system theme; speeds depend on your network and the source server.*
+
+## What's new in v0.2.9
+
+- Show the LDM download button on YouTube Shorts.
+- Follow the active player and current Shorts URL when navigating between videos.
+- Allow Shorts downloads without audio-language metadata; normal YouTube audio selection remains unchanged.
+- Reload the LDM browser extension and refresh YouTube tabs after updating.
 
 ## What's new in v0.2.8
 

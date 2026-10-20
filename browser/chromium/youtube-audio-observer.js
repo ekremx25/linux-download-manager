@@ -18,8 +18,10 @@
  }
  window.addEventListener('message', event => {
   if (event.source !== window || event.origin !== location.origin || event.data?.type !== 'ldm-audio-track-request') return;
+  const short = location.pathname?.startsWith('/shorts/');
+  const active = short ? document.querySelector('ytd-reel-video-renderer[is-active], ytd-reel-video-renderer[active], ytm-reel-item-renderer[is-active]') : null;
   const wrapper = document.querySelector('ytd-watch-flexy ytd-player') || document.querySelector('ytd-player');
-  const players = [document.getElementById('movie_player'), wrapper?.player_, wrapper?.player];
+  const players = short ? [active?.querySelector('.html5-video-player'), active?.querySelector('ytd-player')?.player_] : [document.getElementById('movie_player'), wrapper?.player_, wrapper?.player];
   let language = null;
   for (const player of players) {
    language = languageOf(safely(() => player?.getAudioTrack?.())) ||
@@ -27,6 +29,6 @@
    if (language) break;
   }
   window.postMessage({type:'ldm-audio-track-response',requestId:event.data.requestId,language,
-   videoId:new URL(location.href).searchParams.get('v')}, location.origin);
+   videoId:new URL(location.href).pathname.match(/^\/shorts\/([^/]+)/)?.[1] || new URL(location.href).searchParams.get('v')}, location.origin);
  });
 })();

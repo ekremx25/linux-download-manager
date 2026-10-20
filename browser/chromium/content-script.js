@@ -231,6 +231,7 @@ function bootstrap() {
   document.addEventListener("fullscreenchange", () => { refreshSiteButtonPositions(); scheduleMediaOverlayRefresh(); });
   document.addEventListener("loadedmetadata", handleMediaSignal, true);
   document.addEventListener("play", handleMediaSignal, true);
+  document.addEventListener("yt-navigate-finish", handleRouteChange);
   window.addEventListener("popstate", handleRouteChange);
   window.addEventListener("hashchange", handleRouteChange);
 
@@ -247,6 +248,21 @@ function bootstrap() {
   });
 }
 
+function youtubeVideoId() {
+  const url = new URL(location.href);
+  return url.pathname.match(/^\/shorts\/([^/]+)/)?.[1] || url.searchParams.get('v');
+}
+function youtubePlayer() {
+  if (location.pathname.startsWith('/shorts/')) {
+    const active = document.querySelector('ytd-reel-video-renderer[is-active], ytd-reel-video-renderer[active], ytm-reel-item-renderer[is-active]');
+    if (active) return active.querySelector('.html5-video-player, video') || active;
+    return Array.from(document.querySelectorAll('video')).find(video => {
+      const r = video.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && r.top < innerHeight && r.bottom > 0;
+    }) || null;
+  }
+  return document.querySelector('#movie_player, .html5-video-player');
+}
 function positionYouTubeHeaderButton(button){
  const actions=document.querySelector('ytd-masthead #end #buttons');
  document.getElementById('ldm-youtube-toolbar')?.remove();
@@ -268,7 +284,7 @@ async function selectedAudioLanguage(){
   const finish=language=>{clearTimeout(timer);window.removeEventListener('message',receive);resolve(language);};
   const receive=event=>{
    if(event.source!==window||event.origin!==location.origin||event.data?.type!=='ldm-audio-track-response'||event.data.requestId!==requestId)return;
-   if(event.data.videoId!==new URL(location.href).searchParams.get('v'))return;
+   if(event.data.videoId!==youtubeVideoId())return;
    const language=event.data.language;
    finish(typeof language==='string'&&/^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(language)?language:null);
   };
@@ -565,7 +581,7 @@ function resolveSourcePageUrl(candidate) {
 
 async function triggerCaptureWithFormat(candidate, format, outputContainer) {
   const audioLanguage=await selectedAudioLanguage();
-  if(/(^|\.)youtube\.com$/.test(location.hostname)&&!audioLanguage){showToast('Seçili ses dili okunamadı. YouTube ses parçasını seçip sayfayı yenileyerek tekrar dene.','error');return;}
+  if(/(^|\.)youtube\.com$/.test(location.hostname)&&!location.pathname.startsWith('/shorts/')&&!audioLanguage){showToast('Seçili ses dili okunamadı. YouTube ses parçasını seçip sayfayı yenileyerek tekrar dene.','error');return;}
   showToast("Sending download to Linux Download Manager...", "info");
   armCaptureTimeout();
 
@@ -1260,9 +1276,17 @@ function injectTwitterButtons() {
 }
 
 function injectYouTubeButton() {
-  if (document.getElementById("ldm-yt-download-btn")) return;
-
-  const player = document.querySelector("#movie_player, .html5-video-player");
+  const player = youtubePlayer();
+  const existing = document.getElementById("ldm-yt-download-btn");
+  if (existing) {
+    for (const [anchor, button] of siteDownloadButtons) {
+      if (button === existing) siteDownloadButtons.delete(anchor);
+    }
+    if (!player) { existing.remove(); return; }
+    siteDownloadButtons.set(player, existing);
+    placeAbovePlayer(existing, player);
+    return;
+  }
   if (!player) return;
 
   const btn = document.createElement("button");
@@ -1294,11 +1318,12 @@ function injectYouTubeButton() {
     e.stopPropagation();
     e.stopImmediatePropagation();
 
-    const videoEl = document.querySelector("#movie_player video");
+    const currentPlayer = youtubePlayer();
+    const videoEl = currentPlayer?.matches("video") ? currentPlayer : currentPlayer?.querySelector("video");
     const candidate = {
       element: videoEl || null,
       title: document.querySelector("ytd-watch-metadata h1, #title h1")?.textContent?.trim() || document.title.replace(/\s*[-–]\s*YouTube\s*$/, ""),
-      url: null,
+      url: location.pathname.startsWith("/shorts/") ? location.href : null,
       kind: "media-fallback"
     };
     activeCandidate = candidate;
