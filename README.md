@@ -13,31 +13,31 @@
   <a href="#troubleshooting">Help</a>
 </p>
 
-## Latest release — v0.2.7
+## Latest release — v0.2.8
 
 **The current version is available on the `main` branch and as ready-to-use Linux packages.**
 
-[**Download AppImage**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.7/Linux_Download_Manager-0.2.7-x86_64.AppImage) · [**Download installer**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.7/LinuxDownloadManager-0.2.7-linux-x86_64.tar.gz) · [Release notes](https://github.com/ekremx25/linux-download-manager/releases/tag/v0.2.7)
+[**Download AppImage**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.8/Linux_Download_Manager-0.2.8-x86_64.AppImage) · [**Download installer**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.8/LinuxDownloadManager-0.2.8-linux-x86_64.tar.gz) · [Release notes](https://github.com/ekremx25/linux-download-manager/releases/tag/v0.2.8)
 
-This update keeps large segmented downloads running on slower connections: a connection is only dropped when the server stops sending, a connection that drops after making progress resumes without failing the download, and finished parts are merged faster.
+This update fixes downloads that stalled at 99%: when a download had been split into many parts, its last part could be restarted over and over instead of finishing. Large segmented downloads also keep running on slower connections and merge faster.
 
 Choose **AppImage** for a portable application or **installer** for desktop installation. Both packages target **Linux x86_64**.
 
 ## Install
 
-**Current release: v0.2.7 · Linux x86_64**
+**Current release: v0.2.8 · Linux x86_64**
 
 | Package | Download | How to launch |
 | --- | --- | --- |
-| Portable AppImage | [Linux_Download_Manager-0.2.7-x86_64.AppImage](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.7/Linux_Download_Manager-0.2.7-x86_64.AppImage) | Make executable, then open it. |
-| Desktop installer | [LinuxDownloadManager-0.2.7-linux-x86_64.tar.gz](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.7/LinuxDownloadManager-0.2.7-linux-x86_64.tar.gz) | Extract, then run `Install.desktop` or `bash Install.sh`. |
-| Checksums | [SHA256SUMS](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.7/SHA256SUMS) | Run `sha256sum --ignore-missing -c SHA256SUMS` beside your download. |
+| Portable AppImage | [Linux_Download_Manager-0.2.8-x86_64.AppImage](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.8/Linux_Download_Manager-0.2.8-x86_64.AppImage) | Make executable, then open it. |
+| Desktop installer | [LinuxDownloadManager-0.2.8-linux-x86_64.tar.gz](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.8/LinuxDownloadManager-0.2.8-linux-x86_64.tar.gz) | Extract, then run `Install.desktop` or `bash Install.sh`. |
+| Checksums | [SHA256SUMS](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.8/SHA256SUMS) | Run `sha256sum --ignore-missing -c SHA256SUMS` beside your download. |
 
 ### AppImage
 
 ```bash
-chmod +x Linux_Download_Manager-0.2.7-x86_64.AppImage
-./Linux_Download_Manager-0.2.7-x86_64.AppImage
+chmod +x Linux_Download_Manager-0.2.8-x86_64.AppImage
+./Linux_Download_Manager-0.2.8-x86_64.AppImage
 ```
 
 Keep the AppImage in a permanent location, such as `~/Applications`: browser integration and desktop autostart use its path. If FUSE is unavailable, launch with `--appimage-extract-and-run`.
@@ -72,6 +72,13 @@ Run as your normal user. The installer requests `sudo` for system dependencies a
 ![Download details with individual connections and transfer progress](docs/images/download-details.png)
 
 *Screenshots show example transfers. Colors follow your system theme; speeds depend on your network and the source server.*
+
+## What's new in v0.2.8
+
+- **No more hanging at 99%.** Once a download had been split into 64 parts,
+  the last unfinished part could be picked for another split, refused, and
+  restarted in a loop, fetching only a few bytes each time. That part now keeps
+  its connection and finishes; downloads may also be split into up to 256 parts.
 
 ## What's new in v0.2.7
 
