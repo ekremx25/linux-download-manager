@@ -57,6 +57,8 @@ const SEGMENT_IDLE_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(30)
 };
 const DYNAMIC_SPLIT_MIN_REMAINING: u64 = 2 * 1024 * 1024;
+/// Upper bound on segments one download may be split into, finished ones included.
+const MAX_SEGMENTS: usize = 256;
 /// Used when the browser extension captured no User-Agent for a media request.
 const FALLBACK_MEDIA_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const STREAM_MANIFEST_CONTENT_TYPES: &[&str] = &[
@@ -1711,6 +1713,9 @@ impl DownloadService {
         let mut limit = max_parallel.min(manifest.segments.len());
         let mut split_signals: HashMap<usize, watch::Sender<bool>> = HashMap::new();
         let mut split_in_progress = false;
+        // Segments whose split was refused keep downloading on their own connection
+        // instead of being picked, restarted and refused again in a loop.
+        let mut unsplittable = std::collections::HashSet::new();
         let mut ready_at = Instant::now();
         let mut ticker = tokio::time::interval(Duration::from_millis(200));
         let mut failure = None;
@@ -1757,6 +1762,7 @@ impl DownloadService {
                                     pending.push_back(new_index);
                                 }
                             } else {
+                                unsplittable.insert(i);
                                 pending.push_back(i);
                             }
                         }
@@ -1777,11 +1783,13 @@ impl DownloadService {
             }
             if pending.is_empty() && futures.len() < limit && !split_in_progress {
                 let mut largest = None;
+                // The candidate's own slot frees up when it stops, so a split may use it too.
+                let slots = limit.saturating_sub(futures.len()) + 1;
                 for (&active, signal) in &split_signals {
-                    if *signal.borrow() { continue; }
+                    if *signal.borrow() || unsplittable.contains(&active) { continue; }
                     let (on_disk, _) = self.segment_progress_on_disk(target_path, &manifest.segments[active]).await;
                     let remaining = manifest.segments[active].end.saturating_sub(manifest.segments[active].start.saturating_add(on_disk)).saturating_add(1);
-                    if on_disk > 0 && remaining >= DYNAMIC_SPLIT_MIN_REMAINING && largest.map_or(true, |(_, best)| remaining > best) {
+                    if split_pieces(&manifest, active, on_disk, slots).is_some() && largest.map_or(true, |(_, best)| remaining > best) {
                         largest = Some((active, remaining));
                     }
                 }
@@ -2603,27 +2611,40 @@ fn build_segment_manifest(total_bytes: u64) -> SegmentedDownloadManifest {
 
 /// Keep the downloaded prefix and offer the unreceived tail to idle workers.
 /// Existing segment indexes never change, so pause/resume can reuse every file.
+/// How many pieces the unfinished tail of a segment can be split into, or None
+/// when splitting is impossible. The scheduler picks split candidates with this
+/// same rule: a candidate that the split then refused was restarted and picked
+/// again at once, so a download could loop on its last segment at 99%.
+fn split_pieces(
+    manifest: &SegmentedDownloadManifest,
+    index: usize,
+    downloaded_bytes: u64,
+    available_slots: usize,
+) -> Option<usize> {
+    let segment = manifest.segments.get(index)?;
+    let length = segment.end.checked_sub(segment.start)?.checked_add(1)?;
+    if downloaded_bytes == 0 || downloaded_bytes >= length {
+        return None;
+    }
+    let remaining = length - downloaded_bytes;
+    if remaining < DYNAMIC_SPLIT_MIN_REMAINING {
+        return None;
+    }
+    let pieces = available_slots
+        .min((remaining / (1024 * 1024)) as usize)
+        .min(MAX_SEGMENTS.saturating_sub(manifest.segments.len()));
+    (pieces >= 2).then_some(pieces)
+}
+
 fn split_remaining_segment(
     manifest: &mut SegmentedDownloadManifest,
     index: usize,
     downloaded_bytes: u64,
     available_slots: usize,
 ) -> Option<std::ops::Range<usize>> {
-    let segment = manifest.segments.get(index)?;
-    let length = segment.end.checked_sub(segment.start)?.checked_add(1)?;
-    if downloaded_bytes == 0 || downloaded_bytes >= length || available_slots < 2 {
-        return None;
-    }
-    let remaining = length - downloaded_bytes;
-    if remaining < DYNAMIC_SPLIT_MIN_REMAINING || manifest.segments.len() >= 64 {
-        return None;
-    }
-    let pieces = available_slots
-        .min((remaining / (1024 * 1024)) as usize)
-        .min(64 - manifest.segments.len());
-    if pieces < 2 {
-        return None;
-    }
+    let pieces = split_pieces(manifest, index, downloaded_bytes, available_slots)?;
+    let segment = &manifest.segments[index];
+    let remaining = segment.end - segment.start + 1 - downloaded_bytes;
     let first = manifest.segments.len();
     let mut start = segment.start + downloaded_bytes;
     let old_end = segment.end;
@@ -3337,6 +3358,59 @@ mod segment_tests {
             }
         });
         (addr, requests, server)
+    }
+
+    #[tokio::test]
+    async fn last_segment_is_not_restarted_when_it_cannot_be_split() {
+        let dir = TestDir::new();
+        let target = dir.target();
+        let service = DownloadService::new(Client::new());
+        // The download already reached the segment limit; every part but the last
+        // is finished, and the last still has more than enough left to split.
+        let small = 16u64;
+        let tail = 3 * 1024 * 1024u64;
+        let finished = (MAX_SEGMENTS - 1) as u64;
+        let body_len = (finished * small + tail) as usize;
+        let mut segments: Vec<SegmentPart> = (0..MAX_SEGMENTS - 1)
+            .map(|index| SegmentPart {
+                index,
+                start: index as u64 * small,
+                end: (index as u64 + 1) * small - 1,
+                downloaded_bytes: small,
+            })
+            .collect();
+        segments.push(SegmentPart {
+            index: MAX_SEGMENTS - 1,
+            start: finished * small,
+            end: body_len as u64 - 1,
+            downloaded_bytes: 0,
+        });
+        let pattern = |range: std::ops::Range<u64>| -> Vec<u8> {
+            range.map(|n| (n % 251) as u8).collect()
+        };
+        for segment in &segments[..MAX_SEGMENTS - 1] {
+            fs::write(service.segment_path_for(&target, segment.index), pattern(segment.start..segment.end + 1))
+                .await
+                .unwrap();
+        }
+        let last = &segments[MAX_SEGMENTS - 1];
+        fs::write(service.segment_path_for(&target, last.index), pattern(last.start..last.start + 1024))
+            .await
+            .unwrap();
+        let manifest = SegmentedDownloadManifest { total_bytes: body_len as u64, segments };
+        // ~3 s for the tail, long enough for the scheduler to look for split candidates.
+        let (addr, requests, server) =
+            spawn_paced_range_server(body_len, Duration::from_millis(1), false).await;
+        let url = Url::parse(&format!("http://{addr}/file.bin")).unwrap();
+        let result = service.download_with_segments(
+            &url, &target, manifest, 8, None, &mut |_, _, _| Ok(()), &mut |_| Ok(())
+        ).await;
+        server.abort();
+        assert!(result.is_ok(), "download failed: {:?}", result.err());
+        assert_eq!(requests.load(Ordering::SeqCst), 1, "the last segment was restarted in a loop");
+        let bytes = fs::read(&target).await.unwrap();
+        assert_eq!(bytes.len(), body_len);
+        assert!(bytes.iter().enumerate().all(|(i, byte)| *byte == (i % 251) as u8));
     }
 
     #[tokio::test]
