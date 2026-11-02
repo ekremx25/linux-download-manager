@@ -348,8 +348,24 @@ fn tool_on_path(name: &str, path: &std::ffi::OsStr, uid: u32) -> Option<PathBuf>
         .find(|candidate| trusted_file(candidate, uid, true))
 }
 
+/// Variables an AppImage points into its own bundle. A host tool that inherits
+/// them can break: system python3 under the bundle's PYTHONHOME cannot start,
+/// so a working yt-dlp looked "invalid" to the startup check.
+pub(crate) const BUNDLE_ENV: &[&str] = &[
+    "LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONPATH", "PYTHONHOME", "PERLLIB",
+    "QT_PLUGIN_PATH", "GST_PLUGIN_SYSTEM_PATH", "APPDIR", "APPIMAGE", "OWD",
+];
+
+/// Run host tools (yt-dlp, FFmpeg, runtimes) without the AppImage's bundle paths.
+pub(crate) fn without_bundle_env(command: &mut Command) -> &mut Command {
+    for name in BUNDLE_ENV {
+        command.env_remove(name);
+    }
+    command
+}
+
 fn probe_tool(program: &Path, flag: &str, timeout: Duration, home: &Path) -> Result<(), String> {
-    let mut child = Command::new(program).arg(flag).env("HOME", home).stdin(Stdio::null())
+    let mut child = without_bundle_env(&mut Command::new(program)).arg(flag).env("HOME", home).stdin(Stdio::null())
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn()
         .map_err(|error| format!("{} could not start: {error}", program.display()))?;
     let deadline = Instant::now() + timeout;
@@ -587,6 +603,19 @@ mod tests {
         fs::write(resource, "{}").unwrap();
         setup(&fixture).unwrap();
         assert!(fixture.path.join("data/.setup_done").is_file());
+    }
+
+    #[test]
+    fn probe_ignores_appimage_bundle_environment() {
+        let fixture = ready_fixture();
+        // Mimics system python3 started under an AppImage's PYTHONHOME.
+        let tool = fixture.script("python-tool", "[ -z \"$PYTHONHOME$PYTHONPATH$LD_LIBRARY_PATH\" ] || exit 1");
+        let mut leaked = Command::new(&tool);
+        leaked.env("PYTHONHOME", "/tmp/.mount_x/usr/").env("PYTHONPATH", "/tmp/.mount_x/usr/share/pyshared/")
+            .env("LD_LIBRARY_PATH", "/tmp/.mount_x/usr/lib/");
+        assert!(!leaked.status().unwrap().success(), "fixture must fail with the bundle environment");
+        assert!(without_bundle_env(&mut leaked).status().unwrap().success());
+        assert!(probe_tool(&tool, "--version", Duration::from_secs(2), &fixture.path).is_ok());
     }
 
     #[test]

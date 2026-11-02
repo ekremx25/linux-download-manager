@@ -2325,15 +2325,7 @@ fn parse_ytdlp_progress(line: &str) -> Option<DownloadProgress> {
 
 fn clean_env_command(program: &str) -> Command {
     let mut cmd = Command::new(program);
-    cmd.env_remove("LD_LIBRARY_PATH");
-    cmd.env_remove("LD_PRELOAD");
-    cmd.env_remove("PYTHONPATH");
-    cmd.env_remove("PYTHONHOME");
-    cmd.env_remove("QT_PLUGIN_PATH");
-    cmd.env_remove("GST_PLUGIN_SYSTEM_PATH");
-    cmd.env_remove("APPDIR");
-    cmd.env_remove("APPIMAGE");
-    cmd.env_remove("OWD");
+    crate::platform::without_bundle_env(&mut cmd);
     if let Ok(home) = std::env::var("HOME") {
         let clean_path = format!("{home}/.local/bin:/usr/local/bin:/usr/bin:/bin");
         cmd.env("PATH", clean_path);
