@@ -120,9 +120,7 @@ impl AppState {
 
     pub fn bootstrap() -> Result<Self, String> {
         let app_data_dir = resolve_app_data_dir()?;
-        fs::create_dir_all(&app_data_dir)
-            .map_err(|error| format!("failed to create app data directory: {error}"))?;
-
+        // Storage creates and protects its parent before opening credentials.
         let db_path = app_data_dir.join("downloads.sqlite3");
         let storage = Storage::open(&db_path)?;
 
@@ -301,7 +299,8 @@ impl AppState {
                 force_ytdlp: false,
                 stream_manifest: false,
                 target_path: PathBuf::from(&record.save_path),
-                resumable_hint: record.downloaded_bytes > 0,
+                // A partial file is not evidence that the server accepts ranges.
+                resumable_hint: false,
                 total_bytes_hint: record.total_bytes,
                 expected_checksum: record.expected_checksum.clone(),
                 scheduled_at: record.scheduled_at.clone(),
@@ -763,54 +762,42 @@ async fn run_download(
 
     match download_result {
         Ok((downloaded_bytes, total_bytes, _active_parts)) => {
-            storage.set_status(
-                job.id,
-                "completed",
+            let outcome = finalize_download(
+                storage,
+                download_service,
+                &job,
                 downloaded_bytes,
                 total_bytes.or(total_hint),
-                None,
-            )?;
-            let mut checksum_error = None;
-            if let Some(expected_checksum) = job.expected_checksum.as_deref() {
-                let actual_checksum = download_service.compute_sha256(&job.target_path).await?;
-                let checksum_status = if actual_checksum.eq_ignore_ascii_case(expected_checksum) {
-                    "verified"
-                } else {
-                    checksum_error = Some("SHA-256 checksum mismatch".to_string());
-                    "mismatch"
-                };
-                storage.set_checksum_verification(
-                    job.id,
-                    Some(&actual_checksum),
-                    Some(checksum_status),
-                    checksum_error.as_deref(),
-                )?;
-            }
+            )
+            .await?;
 
             let state = app_handle.state::<AppState>();
             state.emit_download_event(
                 app_handle,
                 job.id,
                 DownloadEventUpdate {
-                    status: "completed",
+                    status: &outcome.status,
                     downloaded_bytes,
-                    total_bytes: total_bytes.or(total_hint),
-                    eta_seconds: Some(0),
+                    total_bytes: outcome.total_bytes,
+                    eta_seconds: (outcome.status == "completed").then_some(0),
                     active_parts: Some(0),
-                    error_message: checksum_error.as_deref(),
+                    error_message: outcome.error_message.as_deref(),
                     ..Default::default()
                 },
             );
             send_download_notification(
                 app_handle,
-                "Download completed",
-                format!(
-                    "{} has finished downloading.",
-                    job.target_path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                ),
+                if outcome.status == "completed" {
+                    "Download completed"
+                } else {
+                    "Download integrity check failed"
+                },
+                outcome.error_message.unwrap_or_else(|| {
+                    format!(
+                        "{} has finished downloading.",
+                        job.target_path.file_name().unwrap_or_default().to_string_lossy()
+                    )
+                }),
             );
         }
         Err(error) => {
@@ -837,6 +824,46 @@ async fn run_download(
     }
 
     Ok(())
+}
+
+// Hashing is part of completion, not a follow-up to a published success. This
+// helper also records hash I/O errors as failures rather than leaving a success.
+async fn finalize_download(
+    storage: &Storage,
+    service: &DownloadService,
+    job: &QueuedDownload,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+) -> Result<crate::download::DownloadRecord, String> {
+    let mut actual = None;
+    let mut checksum_status = None;
+    let mut error = None;
+    if let Some(expected) = job.expected_checksum.as_deref() {
+        match service.compute_sha256(&job.target_path).await {
+            Ok(value) => {
+                checksum_status = Some(if value.eq_ignore_ascii_case(expected) {
+                    "verified"
+                } else {
+                    error = Some("SHA-256 checksum mismatch".to_string());
+                    "mismatch"
+                });
+                actual = Some(value);
+            }
+            Err(cause) => {
+                checksum_status = Some("error");
+                error = Some(format!("SHA-256 verification failed: {cause}"));
+            }
+        }
+    }
+    storage.finish_download(
+        job.id,
+        downloaded_bytes,
+        total_bytes,
+        actual.as_deref(),
+        checksum_status,
+        error.as_deref(),
+    )?;
+    storage.get_download(job.id)
 }
 
 pub fn send_download_notification(app_handle: &AppHandle, title: &str, body: String) {
@@ -931,10 +958,9 @@ mod pause_tests {
 
     fn test_dir(name: &str) -> PathBuf {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join(".temp_files");
+        let root = std::env::var_os("LDM_TEST_ROOT").map(PathBuf::from).unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join(".temp_files")
+        });
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join(format!(
             "app-tests-{}-{}-{}",
@@ -963,6 +989,163 @@ mod pause_tests {
                 pending: VecDeque::new(),
             }),
         }
+    }
+
+    fn integrity_job(state: &AppState, dir: &Path, expected: Option<&str>) -> QueuedDownload {
+        let record = state.storage.insert_download(NewDownloadRecord {
+            url: "https://example.invalid/fixture".into(),
+            file_name: "fixture.bin".into(),
+            save_path: dir.join("fixture.bin"),
+            total_bytes: Some(3),
+            expected_checksum: expected.map(str::to_string),
+            scheduled_at: None,
+            bandwidth_limit_kbps: None,
+            category: "other".into(),
+        }).unwrap();
+        let mut job = state.resume_job(&record).unwrap();
+        job.http_headers.insert("Cookie".into(), "private-fixture-cookie".into());
+        state.storage.save_resume_job(&job).unwrap();
+        state.storage.set_status(job.id, "in_progress", 3, Some(3), None).unwrap();
+        job
+    }
+
+    #[test]
+    fn completion_is_not_published_while_checksum_io_is_pending() {
+        use std::future::Future;
+        let dir = test_dir("checksum-pending");
+        let state = state_at(&dir);
+        let job = integrity_job(&state, &dir, Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
+        std::fs::write(&job.target_path, b"abc").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all().max_blocking_threads(1).build().unwrap();
+        runtime.block_on(async {
+            // Occupy the sole blocking worker so the hash's file open cannot
+            // finish. Observe the exact await boundary without timing sleeps.
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv();
+            });
+            started_rx.await.unwrap();
+            let mut finishing = std::pin::pin!(finalize_download(
+                &state.storage, &state.download_service, &job, 3, Some(3),
+            ));
+            let pending = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(finishing.as_mut().poll(cx).is_pending())
+            }).await;
+            let during_hash = state.storage.get_download(job.id).unwrap();
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            let outcome = finishing.await.unwrap();
+            assert!(pending);
+            assert_eq!(during_hash.status, "in_progress");
+            assert!(during_hash.checksum_status.is_none());
+            assert!(state.storage.load_resume_job(job.id).unwrap().is_none());
+            assert_eq!(outcome.status, "completed");
+            assert_eq!(outcome.checksum_status.as_deref(), Some("verified"));
+        });
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn checksum_mismatch_is_failed_and_retains_explicit_retry_context() {
+        let dir = test_dir("checksum-mismatch");
+        let state = state_at(&dir);
+        let job = integrity_job(&state, &dir, Some(&"0".repeat(64)));
+        std::fs::write(&job.target_path, b"abc").unwrap();
+        let outcome = finalize_download(&state.storage, &state.download_service, &job, 3, Some(3)).await.unwrap();
+        assert_eq!(outcome.status, "failed");
+        assert_eq!(outcome.checksum_status.as_deref(), Some("mismatch"));
+        assert_eq!(outcome.error_message.as_deref(), Some("SHA-256 checksum mismatch"));
+        assert_eq!(outcome.downloaded_bytes, 3);
+        assert_eq!(outcome.actual_checksum.as_deref(), Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
+        assert_eq!(state.storage.load_resume_job(job.id).unwrap().unwrap().http_headers, job.http_headers);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn checksum_verified_or_not_requested_completes_and_releases_credentials() {
+        let dir = test_dir("checksum-success");
+        let state = state_at(&dir);
+        for expected in [None, Some("BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD")] {
+            let job = integrity_job(&state, &dir, expected);
+            std::fs::write(&job.target_path, b"abc").unwrap();
+            let outcome = finalize_download(&state.storage, &state.download_service, &job, 3, Some(3)).await.unwrap();
+            assert_eq!(outcome.status, "completed");
+            assert_eq!(outcome.checksum_status.as_deref(), expected.map(|_| "verified"));
+            assert!(outcome.error_message.is_none());
+            assert!(state.storage.load_resume_job(job.id).unwrap().is_none());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn checksum_read_error_never_leaves_completed_status() {
+        let dir = test_dir("checksum-read-error");
+        let state = state_at(&dir);
+        let job = integrity_job(&state, &dir, Some(&"0".repeat(64)));
+        let outcome = finalize_download(&state.storage, &state.download_service, &job, 3, Some(3)).await.unwrap();
+        assert_eq!(outcome.status, "failed");
+        assert_eq!(outcome.checksum_status.as_deref(), Some("error"));
+        assert!(outcome.error_message.unwrap().starts_with("SHA-256 verification failed:"));
+        assert!(state.storage.load_resume_job(job.id).unwrap().is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn resume_capability_uses_saved_server_hint_not_status_or_partial_bytes() {
+        let dir = test_dir("resume-capability");
+        let state = state_at(&dir);
+        let mut job = integrity_job(&state, &dir, None);
+        for status in ["paused", "failed", "queued", "in_progress"] {
+            state.storage.set_status(job.id, status, 2, Some(3), None).unwrap();
+            let record = state.storage.get_download(job.id).unwrap();
+            assert!(!state.resume_job(&record).unwrap().resumable_hint);
+            job.resumable_hint = true;
+            state.storage.save_resume_job(&job).unwrap();
+            assert!(state.resume_job(&record).unwrap().resumable_hint);
+            job.resumable_hint = false;
+            state.storage.save_resume_job(&job).unwrap();
+        }
+        state.storage.set_status(job.id, "cancelled", 2, Some(3), None).unwrap();
+        let record = state.storage.get_download(job.id).unwrap();
+        assert!(!state.resume_job(&record).unwrap().resumable_hint);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn explicit_resume_clears_both_persisted_schedules_and_is_compare_and_set() {
+        let dir = test_dir("resume-schedule");
+        let state = state_at(&dir);
+        let record = state.storage.insert_download(NewDownloadRecord {
+            url: "https://example.invalid/scheduled".into(),
+            file_name: "scheduled.bin".into(),
+            save_path: dir.join("scheduled.bin"),
+            total_bytes: Some(3),
+            expected_checksum: None,
+            scheduled_at: Some("2099-01-01T00:00:00+00:00".into()),
+            bandwidth_limit_kbps: None,
+            category: "other".into(),
+        }).unwrap();
+        let mut job = state.resume_job(&record).unwrap();
+        job.http_headers.insert("Cookie".into(), "private-fixture-cookie".into());
+        state.storage.save_resume_job(&job).unwrap();
+        state.storage.set_status(job.id, "paused", 2, Some(3), None).unwrap();
+        assert!(state.storage.get_download(job.id).unwrap().scheduled_at.is_some());
+        // The public schedule must be cleared too, not just the serialized job.
+        state.storage.prepare_resume(&mut job).unwrap();
+        assert!(job.scheduled_at.is_none());
+        let record = state.storage.get_download(job.id).unwrap();
+        assert_eq!(record.status, "queued");
+        assert!(record.scheduled_at.is_none());
+        assert!(state.storage.prepare_resume(&mut job).is_err());
+        drop(state);
+        let restored = state_at(&dir);
+        let saved = restored.resume_job(&restored.storage.get_download(job.id).unwrap()).unwrap();
+        assert!(saved.scheduled_at.is_none());
+        assert_eq!(saved.http_headers, job.http_headers);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

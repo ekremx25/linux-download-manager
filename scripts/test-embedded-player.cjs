@@ -257,7 +257,10 @@ vm.runInContext('refreshMediaOverlay()',c);
 assert.equal(attached.length,1,'refresh must not duplicate the button');
 currentEmbedUrl='https://rapidvid.org/vx/second';
 vm.runInContext('triggerCaptureOnce=(candidate)=>{globalThis.clickedPlayer=candidate.playerPageUrl;}',c);
-listeners.get('click')({preventDefault(){},stopPropagation(){}});
+listeners.get('click')({isTrusted:false,preventDefault(){},stopPropagation(){}});
+assert.equal(c.clickedPlayer,undefined,'synthetic clicks must not capture the current player');
+// VM control models a browser-generated click; it cannot forge DOM isTrusted.
+listeners.get('click')({isTrusted:true,preventDefault(){},stopPropagation(){}});
 assert.equal(c.clickedPlayer,currentEmbedUrl,'click must use the current player, not stale iframe URL');
 attached[0].isConnected=false;
 vm.runInContext('refreshMediaOverlay()',c);

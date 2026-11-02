@@ -13,38 +13,38 @@
   <a href="#troubleshooting">Help</a>
 </p>
 
-## Latest release — v0.2.9
+## Latest release — v0.3.0
 
 **The current version is available on the `main` branch and as ready-to-use Linux packages.**
 
-[**Download AppImage**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.9/Linux_Download_Manager-0.2.9-x86_64.AppImage) · [**Download installer**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.9/LinuxDownloadManager-0.2.9-linux-x86_64.tar.gz) · [Release notes](https://github.com/ekremx25/linux-download-manager/releases/tag/v0.2.9)
+[**Download AppImage**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.3.0/Linux_Download_Manager-0.3.0-x86_64.AppImage) · [**Download installer**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.3.0/LinuxDownloadManager-0.3.0-linux-x86_64.tar.gz) · [Release notes](https://github.com/ekremx25/linux-download-manager/releases/tag/v0.3.0)
 
-This update adds the LDM download button to YouTube Shorts, follows the active Short as you scroll, and allows Shorts downloads when selected audio-language metadata is unavailable. It also includes the previous 99% stall fix.
+This is a security and reliability release. LDM no longer downloads programs when it starts, keeps your yt-dlp configuration untouched, stores its data privately, and refuses to resume a download whose file changed on the server. If yt-dlp is missing, install it with your package manager or the installer.
 
 Choose **AppImage** for a portable application or **installer** for desktop installation. Both packages target **Linux x86_64**.
 
 ## Install
 
-**Current release: v0.2.9 · Linux x86_64**
+**Current release: v0.3.0 · Linux x86_64**
 
 | Package | Download | How to launch |
 | --- | --- | --- |
-| Portable AppImage | [Linux_Download_Manager-0.2.9-x86_64.AppImage](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.9/Linux_Download_Manager-0.2.9-x86_64.AppImage) | Make executable, then open it. |
-| Desktop installer | [LinuxDownloadManager-0.2.9-linux-x86_64.tar.gz](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.9/LinuxDownloadManager-0.2.9-linux-x86_64.tar.gz) | Extract, then run `Install.desktop` or `bash Install.sh`. |
-| Checksums | [SHA256SUMS](https://github.com/ekremx25/linux-download-manager/releases/download/v0.2.9/SHA256SUMS) | Run `sha256sum --ignore-missing -c SHA256SUMS` beside your download. |
+| Portable AppImage | [Linux_Download_Manager-0.3.0-x86_64.AppImage](https://github.com/ekremx25/linux-download-manager/releases/download/v0.3.0/Linux_Download_Manager-0.3.0-x86_64.AppImage) | Make executable, then open it. |
+| Desktop installer | [LinuxDownloadManager-0.3.0-linux-x86_64.tar.gz](https://github.com/ekremx25/linux-download-manager/releases/download/v0.3.0/LinuxDownloadManager-0.3.0-linux-x86_64.tar.gz) | Extract, then run `Install.desktop` or `bash Install.sh`. |
+| Checksums | [SHA256SUMS](https://github.com/ekremx25/linux-download-manager/releases/download/v0.3.0/SHA256SUMS) | Run `sha256sum --ignore-missing -c SHA256SUMS` beside your download. |
 
 ### AppImage
 
 ```bash
-chmod +x Linux_Download_Manager-0.2.9-x86_64.AppImage
-./Linux_Download_Manager-0.2.9-x86_64.AppImage
+chmod +x Linux_Download_Manager-0.3.0-x86_64.AppImage
+./Linux_Download_Manager-0.3.0-x86_64.AppImage
 ```
 
 Keep the AppImage in a permanent location, such as `~/Applications`: browser integration and desktop autostart use its path. If FUSE is unavailable, launch with `--appimage-extract-and-run`.
 
 Release packages are built on Ubuntu 22.04. The AppImage targets Ubuntu 22.04+ and compatible x86_64 Linux distributions; compatibility with every distribution is not guaranteed. The installer archive uses your system's GTK3 and WebKitGTK 4.1 libraries. If those are incompatible, build from source below.
 
-**Video tools:** FFmpeg is needed for merging and conversion. Supported site extraction also uses yt-dlp and a JavaScript runtime. The AppImage does not install system packages; the source/archive installer can install dependencies with `pacman`, `apt` or `dnf`.
+**Video tools:** FFmpeg is needed for merging and conversion. Supported site extraction also uses yt-dlp and a JavaScript runtime. The AppImage does not install system packages; the source/archive installer can install dependencies with `pacman`, `apt` or `dnf`. LDM no longer downloads executables during startup: install missing tools with your package manager or the installer. Runtime options are passed per invocation without rewriting your shared yt-dlp configuration.
 
 **Browser integration:** installing or launching LDM prepares the extension files. Complete the one-time browser steps below to activate them.
 
@@ -72,6 +72,25 @@ Run as your normal user. The installer requests `sudo` for system dependencies a
 ![Download details with individual connections and transfer progress](docs/images/download-details.png)
 
 *Screenshots show example transfers. Colors follow your system theme; speeds depend on your network and the source server.*
+
+## What's new in v0.3.0
+
+- **No downloads at startup.** LDM no longer fetches yt-dlp or other programs
+  when it starts. It checks the tools already on your system, with a timeout,
+  and stops a tool that hangs. Install missing tools with your package manager
+  or the installer, which verifies yt-dlp's SHA-256 checksum before using it.
+- **Your yt-dlp configuration stays yours.** Options are passed to each run
+  instead of rewriting the shared yt-dlp configuration.
+- **Private data.** The data folder and download database are readable only by
+  you, and symlinked or hard-linked files are refused rather than followed.
+  Data from older versions is moved over once and never overwritten.
+- **Safer resume.** A paused download only continues if the file on the server
+  is still the same (ETag/Last-Modified); otherwise it is not stitched together
+  from two different files. Saved login details are cleared once a download
+  finishes or fails for good.
+- **Browser bridge checks.** The native host only starts the app from a safe,
+  regular executable, and an old custom binary is never launched.
+- After updating, reload the LDM browser extension.
 
 ## What's new in v0.2.9
 
@@ -207,7 +226,7 @@ Use Settings to choose speed limits, connection counts, captured file extensions
 
 ## Updates and removal
 
-Download a newer AppImage or rerun the newer installer. Finish or pause active transfers before restarting. Keep the AppImage at a stable path, and reload the browser extension when its files change. Installation preserves download history and creates backups of replaced installation files.
+Download a newer AppImage or rerun the newer installer. Finish or pause active transfers before restarting. Keep the AppImage at a stable path, and reload the browser extension when its files change. Installation preserves download history.
 
 For a clean source checkout with a tracking branch:
 
@@ -222,7 +241,7 @@ For a clean source checkout with a tracking branch:
 | `--skip-build` | Install existing local release binaries. |
 | `--prebuilt` | Install binaries from an extracted installer archive. |
 
-Run `./uninstall.sh` from the installer/source directory to remove an installed copy. Downloaded files, history and backups are preserved. Remove the browser extension separately.
+Run `./uninstall.sh` from the installer/source directory to remove an installed copy. Downloaded files and history are preserved. Remove the browser extension separately.
 
 ## Troubleshooting
 
@@ -251,13 +270,14 @@ cargo build --release --locked --bins
 cargo test --locked --workspace
 node scripts/test-extension-settings.cjs
 node scripts/test-embedded-player.cjs
+node scripts/test-security-ui.cjs
 python3 scripts/test-installer.py
 
 # Create a local installer archive in dist/
 ./scripts/build-installer.sh
 ```
 
-The GitHub Actions **Build Linux packages** workflow builds the AppImage and installer on Ubuntu 22.04, checks their payloads and uploads checksummed artifacts. Additional tests in `scripts/` cover browser capture and transfer behavior; browser tests may require Playwright, Chromium and a local UI server.
+The GitHub Actions **Regression tests** workflow runs locked Rust, dependency-free Node and isolated fake-installer checks on pushes and pull requests. **Build Linux packages** builds the AppImage and installer on Ubuntu 22.04, checks their payloads and uploads checksummed artifacts with unsigned build metadata. Additional tests in `scripts/` cover browser capture and transfer behavior; browser tests may require Playwright, Chromium and a local UI server. `node scripts/test-security-ui-browser.cjs` uses local mocked requests and an ephemeral browser context; use `NODE_PATH` for an existing Playwright installation and `LDM_BROWSER` to select Chromium.
 
 | Directory | Contents |
 | --- | --- |

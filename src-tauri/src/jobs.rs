@@ -37,7 +37,6 @@ pub async fn queue_download_request(
     state: &AppState,
     request: DownloadJobRequest,
 ) -> Result<DownloadRecord, String> {
-    let _guard = state.import_guard.lock().await;
     let transfer = request
         .transfer
         .clone()
@@ -100,6 +99,9 @@ pub async fn queue_download_request(
     // the folder is created before the engine opens a single file handle.
     let category = library::classify(&file_name);
     let category_dir = library::ensure_category_dir(&target_dir, category)?;
+    // Network metadata/caption lookups finish before reserving a target. Keep
+    // duplicate detection and insertion atomic across concurrent imports.
+    let guard = state.import_guard.lock().await;
     let existing = state.storage.list_downloads()?;
     if request.stream_manifest
         && let Some(asset_id) = molystream_asset_id(&request.url)
@@ -188,6 +190,7 @@ pub async fn queue_download_request(
     state
         .storage
         .set_status(created.id, initial_status, 0, metadata.content_length, None)?;
+    drop(guard);
     state.emit_download_event(
         app_handle,
         created.id,
@@ -340,6 +343,31 @@ pub fn normalize_bandwidth_limit(value: Option<u64>) -> Result<Option<u64>, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn import_reservation_critical_section_excludes_network_awaits() {
+        let source = include_str!("jobs.rs");
+        let body = source.split("fn molystream_asset_id").next().unwrap();
+        let locked = body.split("let guard = state.import_guard.lock().await;").nth(1).unwrap();
+        let critical = locked.split("drop(guard);").next().unwrap();
+        assert!(!critical.contains(".await"));
+        assert!(critical.contains("list_downloads()?"));
+        assert!(critical.contains("reserve_target_path("));
+        assert!(critical.contains("insert_download("));
+        assert!(critical.contains("save_resume_job(&job)?"));
+    }
+
+    #[test]
+    fn explicit_resume_publishes_queued_before_starting_a_worker() {
+        let source = include_str!("commands.rs");
+        let body = source.split("pub async fn resume_download(").nth(1).unwrap()
+            .split("pub async fn cancel_download(").next().unwrap();
+        let persist = body.find("prepare_resume(&mut job)?").unwrap();
+        let emit = body.find("state.emit_download_event(").unwrap();
+        let start = body.find("state.enqueue_download(").unwrap();
+        assert!(persist < emit && emit < start);
+        assert!(!body[start..].contains("status: \"queued\""));
+    }
+
     #[test]
     fn molystream_master_and_rendition_identify_one_video() {
         let id = "17522-6ace05cde218992aaaf364c1";

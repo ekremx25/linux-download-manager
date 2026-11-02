@@ -1,8 +1,11 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::os::unix::fs::DirBuilderExt;
+use std::process::{Command, Stdio};
 use std::io::Write;
+use std::time::{Duration, Instant};
+use crate::trusted_executable::{current_uid, trusted_directory, trusted_file};
 
 const EXTENSION_FILES: [&str; 9] = [
     "manifest.json", "service-worker.js", "player-manifest-observer.js",
@@ -35,15 +38,23 @@ pub fn package_firefox_extension(
 }
 
 pub fn resolve_app_data_dir() -> Result<PathBuf, String> {
-    if let Ok(value) = env::var("XDG_DATA_HOME") {
-        return Ok(PathBuf::from(value).join("linux-download-manager-custom"));
-    }
+    let base = match env::var("XDG_DATA_HOME") {
+        Ok(value) => PathBuf::from(value),
+        Err(_) => {
+            let home = env::var("HOME").map_err(|_| "HOME environment variable is missing".to_string())?;
+            PathBuf::from(home).join(".local").join("share")
+        }
+    };
+    let data = base.join("linux-download-manager");
+    migrate_legacy_data_dir(&base.join("linux-download-manager-custom"), &data);
+    Ok(data)
+}
 
-    let home = env::var("HOME").map_err(|_| "HOME environment variable is missing".to_string())?;
-    Ok(PathBuf::from(home)
-        .join(".local")
-        .join("share")
-        .join("linux-download-manager-custom"))
+/// Earlier releases kept history under a "-custom" folder; adopt it once.
+fn migrate_legacy_data_dir(legacy: &Path, data: &Path) {
+    if !data.exists() && legacy.is_dir() && !legacy.is_symlink() {
+        let _ = fs::rename(legacy, data);
+    }
 }
 
 pub fn resolve_default_download_dir() -> Result<PathBuf, String> {
@@ -87,67 +98,81 @@ pub fn is_first_run() -> bool {
     !app_data.join(".setup_done").exists()
 }
 
-pub fn run_first_time_setup() {
-    let home = match env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-
-    let app_data = match resolve_app_data_dir() {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    if let Some(image) = env::var_os("APPIMAGE").map(PathBuf::from)
-        .filter(|p| p.is_absolute() && p.is_file()) {
-        let _ = fs::create_dir_all(&app_data);
-        let _ = fs::write(app_data.join(".appimage_path"), image.to_string_lossy().as_bytes());
+/// No network access or shared yt-dlp configuration: tools are installed by the
+/// package/archive installer. Every external probe has a finite deadline.
+pub fn run_first_time_setup() -> Result<(), String> {
+    let home = env::var("HOME").map_err(|_| "HOME environment variable is missing")?;
+    let app_data = resolve_app_data_dir()?;
+    let executable = env::current_exe().map_err(|error| error.to_string())?;
+    let exe_dir = executable.parent().ok_or("Executable directory is missing")?;
+    let path = env::var_os("PATH").unwrap_or_default();
+    let uid = current_uid()?;
+    create_private_dir(&app_data)?;
+    if !trusted_directory(&app_data, uid) {
+        return Err("Application data directory has unsafe ownership or permissions".into());
     }
-    let setup_marker = app_data.join(".setup_done");
-    let current_exe = env::current_exe().unwrap_or_default();
-    let exe_dir = current_exe.parent().unwrap_or(Path::new("."));
-
-    let source_native_host = exe_dir.join("browser_native_host");
-    if !source_native_host.exists() {
-        return;
+    if let Some(image) = env::var_os("APPIMAGE").map(PathBuf::from) {
+        if !trusted_file(&image, uid, true) {
+            return Err("Cannot register an unsafe or non-executable AppImage".into());
+        }
+        let registration = app_data.join(".appimage_path");
+        let bytes = image.as_os_str().as_encoded_bytes();
+        if fs::read(&registration).ok().as_deref() != Some(bytes) {
+            write_atomic(&registration, bytes, false)?;
+        }
     }
+    setup_at(Path::new(&home), &app_data, exe_dir, &path, uid)
+}
 
-    let bin_dir = app_data.join("bin");
-    let _ = fs::create_dir_all(&bin_dir);
-    // System packages keep the host beside the app so browser launches resolve
-    // the package-managed executable, rather than a stale user installation.
+fn setup_at(
+    home: &Path,
+    app_data: &Path,
+    exe_dir: &Path,
+    path: &std::ffi::OsStr,
+    uid: u32,
+) -> Result<(), String> {
     let system_package = exe_dir == Path::new("/usr/lib/linux-download-manager");
+    let source_native_host = exe_dir.join("browser_native_host");
     let installed_native_host = if system_package {
         source_native_host.clone()
     } else {
-        bin_dir.join("browser_native_host")
+        app_data.join("bin/browser_native_host")
     };
-    if !system_package {
-        let _ = fs::copy(&source_native_host, &installed_native_host);
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if !system_package {
-            let _ = fs::set_permissions(&installed_native_host, fs::Permissions::from_mode(0o755));
-        }
-    }
-
-    let needs_setup = if setup_marker.exists() {
-        let stored = fs::read_to_string(&setup_marker).unwrap_or_default();
-        stored.trim() != installed_native_host.to_string_lossy().trim()
+    // Per-user installs keep the host in app-data, not beside the launcher.
+    let source_native_host = if !system_package && !source_native_host.exists() {
+        installed_native_host.clone()
     } else {
-        true
+        source_native_host
     };
-
-    install_browser_extension(exe_dir, &app_data, &home);
-    install_firefox_native_host(&home, &installed_native_host);
-    if !needs_setup && !system_package {
-        return;
+    use sha2::{Digest, Sha256};
+    if !trusted_file(&source_native_host, uid, true) {
+        return Err("Native messaging host is missing or unsafe; reinstall LDM".into());
+    }
+    let host_bytes = fs::read(&source_native_host).map_err(|error| error.to_string())?;
+    let marker = app_data.join(".setup_done");
+    let expected = format!("startup-v2:{}\n{}\n{:x}", env!("CARGO_PKG_VERSION"), installed_native_host.display(), Sha256::digest(&host_bytes));
+    if trusted_file(&marker, uid, false)
+        && fs::read_to_string(&marker).is_ok_and(|stored| stored == expected)
+        && trusted_file(&installed_native_host, uid, true)
+        && fs::read(&installed_native_host).is_ok_and(|bytes| bytes == host_bytes)
+    {
+        return Ok(());
     }
 
-    let extension_id = detect_extension_id(&home);
+    match fs::remove_file(&marker) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    if !system_package {
+        let parent = installed_native_host.parent().ok_or("Host directory is missing")?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        write_atomic(&installed_native_host, &host_bytes, true)?;
+    }
+    install_browser_extension(exe_dir, app_data, home)?;
+    install_firefox_native_host(home, &installed_native_host)?;
 
+    let extension_id = detect_extension_id(&home.to_string_lossy());
     let manifest = serde_json::json!({
         "name": "com.eko.linuxdownloadmanager",
         "description": "Native messaging bridge for Linux Download Manager",
@@ -155,48 +180,57 @@ pub fn run_first_time_setup() {
         "type": "stdio",
         "allowed_origins": [format!("chrome-extension://{extension_id}/")]
     });
-
-    let manifest_json = serde_json::to_string_pretty(&manifest).unwrap_or_default();
-
-    let browser_dirs = [
-        format!("{home}/.config/google-chrome/NativeMessagingHosts"),
-        format!("{home}/.config/chromium/NativeMessagingHosts"),
-        format!("{home}/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts"),
-        format!("{home}/.config/microsoft-edge-dev/NativeMessagingHosts"),
-        format!("{home}/.config/microsoft-edge/NativeMessagingHosts"),
-        format!("{home}/.config/vivaldi/NativeMessagingHosts"),
-    ];
-
-    for dir in &browser_dirs {
-        let dir_path = Path::new(dir);
-        if dir_path.parent().map(|p| p.exists()).unwrap_or(false) {
-            let _ = fs::create_dir_all(dir_path);
-            let manifest_path = dir_path.join("com.eko.linuxdownloadmanager.json");
-            let _ = fs::write(&manifest_path, &manifest_json);
+    let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+    for browser in [
+        ".config/google-chrome", ".config/chromium", ".config/BraveSoftware/Brave-Browser",
+        ".config/microsoft-edge-dev", ".config/microsoft-edge", ".config/vivaldi",
+    ] {
+        let profile = home.join(browser);
+        if profile.is_dir() {
+            let directory = profile.join("NativeMessagingHosts");
+            fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+            write_atomic(&directory.join("com.eko.linuxdownloadmanager.json"), &manifest_json, false)?;
         }
     }
-
-    if system_package {
-        configure_ytdlp_js_runtime(&home);
-    } else {
-        install_ytdlp(&home);
-    }
-    install_browser_extension(exe_dir, &app_data, &home);
-
-    let _ = fs::create_dir_all(&app_data);
-    let _ = fs::write(
-        &setup_marker,
-        installed_native_host.to_string_lossy().as_ref(),
-    );
+    // Preserve HTTP/browser integration even when optional media tools need
+    // installation, but never record the whole setup as successful in that case.
+    validate_media_tools(home, path, uid, Duration::from_secs(2))?;
+    fs::create_dir_all(app_data).map_err(|error| error.to_string())?;
+    write_atomic(&marker, expected.as_bytes(), false)
 }
 
-fn install_firefox_native_host(home: &str, native_host: &Path) {
-    if !Path::new(&format!("{home}/.mozilla")).exists()
-        && !Command::new("which").arg("firefox").output().is_ok_and(|o| o.status.success()) {
-        return;
+fn create_private_dir(path: &Path) -> Result<(), String> {
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(path)
+        .map_err(|error| error.to_string())
+}
+
+fn write_atomic(destination: &Path, contents: &[u8], executable: bool) -> Result<(), String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let parent = destination.parent().ok_or("Destination directory is missing")?;
+    if !trusted_directory(parent, current_uid()?) {
+        return Err(format!("Unsafe destination directory: {}", parent.display()));
     }
-    let firefox_dir = PathBuf::from(home).join(".mozilla/native-messaging-hosts");
-    let _ = fs::create_dir_all(&firefox_dir);
+    let name = destination.file_name().ok_or("Destination filename is missing")?;
+    let temporary = parent.join(format!(".{}.{}.tmp", name.to_string_lossy(), std::process::id()));
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+        .open(&temporary).map_err(|error| error.to_string())?;
+    let result = (|| {
+        file.write_all(contents).map_err(|error| error.to_string())?;
+        file.set_permissions(fs::Permissions::from_mode(if executable { 0o755 } else { 0o600 }))
+            .map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        fs::rename(&temporary, destination).map_err(|error| error.to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn install_firefox_native_host(home: &Path, native_host: &Path) -> Result<(), String> {
+    // Register locally without probing or launching a browser process.
+    let firefox_dir = home.join(".mozilla/native-messaging-hosts");
+    fs::create_dir_all(&firefox_dir).map_err(|error| error.to_string())?;
     let manifest = serde_json::json!({
         "name": "com.eko.linuxdownloadmanager",
         "description": "Native messaging bridge for Linux Download Manager",
@@ -204,7 +238,7 @@ fn install_firefox_native_host(home: &str, native_host: &Path) {
         "type": "stdio",
         "allowed_extensions": ["ldm-bridge@ekremx25.github.io"]
     });
-    let _ = fs::write(firefox_dir.join("com.eko.linuxdownloadmanager.json"), manifest.to_string());
+    write_atomic(&firefox_dir.join("com.eko.linuxdownloadmanager.json"), manifest.to_string().as_bytes(), false)
 }
 
 fn detect_extension_id(home: &str) -> String {
@@ -235,7 +269,7 @@ fn detect_extension_id(home: &str) -> String {
     "dhbkcopeagecbkoncdjefnjlcienhlpg".to_string()
 }
 
-fn install_browser_extension(exe_dir: &Path, app_data: &Path, home: &str) {
+fn install_browser_extension(exe_dir: &Path, app_data: &Path, home: &Path) -> Result<(), String> {
     // Put the extension under ~/Documents so the user can find it visually
     // ("Load unpacked" in chrome://extensions), not buried under ~/.local/share.
     let ext_dest = PathBuf::from(home)
@@ -266,200 +300,109 @@ fn install_browser_extension(exe_dir: &Path, app_data: &Path, home: &str) {
         }
     }
 
-    let source_dir = match candidates.into_iter().find(|p| p.is_dir()) {
-        Some(p) => p,
-        None => return,
-    };
-
-    let _ = fs::create_dir_all(&ext_dest);
-
-    for file in &EXTENSION_FILES {
-        let src = source_dir.join(file);
-        let dst = ext_dest.join(file);
-        if src.exists() {
-            let _ = fs::copy(&src, &dst);
-        }
-    }
-
-    let firefox_manifest_source = source_dir.parent().map(|browser_dir| browser_dir.join("firefox/manifest.json"));
-    if let Some(manifest_source) = firefox_manifest_source.filter(|path| path.exists()) {
-        let firefox_dest = PathBuf::from(home).join("Documents/Linux Download Manager Firefox Extension");
-        let _ = fs::create_dir_all(&firefox_dest);
-        let _ = fs::copy(manifest_source, firefox_dest.join("manifest.json"));
-        for file in &EXTENSION_FILES {
-            if *file != "manifest.json" {
-                let _ = fs::copy(source_dir.join(file), firefox_dest.join(file));
+    let source_dir = match candidates.into_iter().find(|path| path.is_dir()) {
+        Some(source) => source,
+        None => {
+            // The per-user installer has already published these payloads.
+            let firefox_dest = home.join("Documents/Linux Download Manager Firefox Extension");
+            let uid = current_uid()?;
+            if !EXTENSION_FILES.iter().all(|name| {
+                trusted_file(&ext_dest.join(name), uid, false)
+                    && trusted_file(&firefox_dest.join(name), uid, false)
+            }) {
+                return Err("Bundled browser extension is missing; reinstall LDM".into());
             }
+            package_firefox_extension(
+                &firefox_dest,
+                home.join("Documents/Linux Download Manager Firefox Extension.zip"),
+            )?;
+            return write_atomic(&ext_marker, ext_dest.as_os_str().as_encoded_bytes(), false);
         }
-        let output_zip = PathBuf::from(home).join("Documents/Linux Download Manager Firefox Extension.zip");
-        if let Err(error) = package_firefox_extension(&firefox_dest, output_zip) {
-            eprintln!("WARNING: could not package Firefox extension: {error}");
-        }
+    };
+    fs::create_dir_all(&ext_dest).map_err(|error| error.to_string())?;
+    for name in EXTENSION_FILES {
+        let contents = fs::read(source_dir.join(name)).map_err(|error| format!("{name}: {error}"))?;
+        write_atomic(&ext_dest.join(name), &contents, false)?;
     }
 
-    if ext_marker.exists() {
-        return;
+    let manifest_source = source_dir.parent().ok_or("Browser resource directory is missing")?
+        .join("firefox/manifest.json");
+    let firefox_dest = home.join("Documents/Linux Download Manager Firefox Extension");
+    fs::create_dir_all(&firefox_dest).map_err(|error| error.to_string())?;
+    for name in EXTENSION_FILES {
+        let source = if name == "manifest.json" { manifest_source.clone() } else { source_dir.join(name) };
+        let contents = fs::read(&source).map_err(|error| format!("{}: {error}", source.display()))?;
+        write_atomic(&firefox_dest.join(name), &contents, false)?;
     }
-
-    let browsers = [
-        ("google-chrome", format!("{home}/.config/google-chrome")),
-        ("chromium-browser", format!("{home}/.config/chromium")),
-        (
-            "brave-browser",
-            format!("{home}/.config/BraveSoftware/Brave-Browser"),
-        ),
-        (
-            "brave",
-            format!("{home}/.config/BraveSoftware/Brave-Browser"),
-        ),
-        (
-            "microsoft-edge-dev",
-            format!("{home}/.config/microsoft-edge-dev"),
-        ),
-        ("microsoft-edge", format!("{home}/.config/microsoft-edge")),
-        ("vivaldi", format!("{home}/.config/vivaldi")),
-    ];
-
-    // Open the extensions page on whichever Chromium-based browser the user
-    // actually has installed. First match wins.
-    for (browser_cmd, config_dir) in &browsers {
-        if Path::new(config_dir).exists()
-            && Command::new("which")
-                .arg(browser_cmd)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        {
-            let _ = Command::new(browser_cmd).arg("chrome://extensions").spawn();
-            break;
-        }
-    }
-
-    // Show a proper modal dialog (zenity → kdialog → notify-send fallback)
-    // with the exact path the user has to pick in 'Load unpacked'.
-    let message = format!(
-        "Linux Download Manager is installed.\n\n\
-        To install the browser extension:\n\n\
-        1. On the chrome://extensions page that just opened, turn on \
-        \"Developer mode\" in the top right corner\n\n\
-        2. Click \"Load unpacked\"\n\n\
-        3. Select this folder:\n   {}\n\n\
-        Firefox test: about:debugging → This Firefox → Load Temporary Add-on, then select:
-        {home}/Documents/Linux Download Manager Firefox Extension.zip
-
-        Firefox requires a Mozilla-signed add-on for a permanent installation.
-
-        (These folders live under Documents; do not delete them, the app depends on them.)",
-        ext_dest.display()
-    );
-
-    let zenity_ok = Command::new("zenity")
-        .args([
-            "--info",
-            "--title=Linux Download Manager",
-            "--width=520",
-            &format!("--text={message}"),
-        ])
-        .spawn()
-        .is_ok();
-
-    if !zenity_ok {
-        let kdialog_ok = Command::new("kdialog")
-            .args(["--title", "Linux Download Manager", "--msgbox", &message])
-            .spawn()
-            .is_ok();
-
-        if !kdialog_ok {
-            // Final fallback: notify-send (no interactive modal).
-            let _ = Command::new("notify-send")
-                .args(["Linux Download Manager", &message, "-t", "30000"])
-                .spawn();
-        }
-    }
-
-    let _ = fs::write(&ext_marker, ext_dest.to_string_lossy().as_ref());
+    package_firefox_extension(
+        &firefox_dest,
+        home.join("Documents/Linux Download Manager Firefox Extension.zip"),
+    )?;
+    // Do not launch browsers or modal helper processes from startup.
+    eprintln!("Browser extension files: {}", ext_dest.display());
+    write_atomic(&ext_marker, ext_dest.as_os_str().as_encoded_bytes(), false)
 }
 
-fn install_ytdlp(home: &str) {
-    let local_bin = format!("{home}/.local/bin");
-    let ytdlp_path = format!("{local_bin}/yt-dlp");
+fn tool_on_path(name: &str, path: &std::ffi::OsStr, uid: u32) -> Option<PathBuf> {
+    env::split_paths(path).map(|directory| directory.join(name))
+        .find(|candidate| trusted_file(candidate, uid, true))
+}
 
-    let already_present =
-        Path::new(&ytdlp_path).exists() || Command::new("yt-dlp").arg("--version").output().is_ok();
-
-    if !already_present {
-        let _ = fs::create_dir_all(&local_bin);
-        let curl_status = Command::new("curl")
-            .args([
-                "-fL",
-                "-o",
-                &ytdlp_path,
-                "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp",
-            ])
-            .status();
-
-        match curl_status {
-            Ok(status) if status.success() => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&ytdlp_path, fs::Permissions::from_mode(0o755));
-                }
-            }
-            _ => {
-                eprintln!(
-                    "WARNING: failed to download yt-dlp. YouTube/social media \
-                     downloads will be disabled until you run:\n\
-                     \tcurl -fL -o ~/.local/bin/yt-dlp \\\n\
-                     \t\thttps://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp\n\
-                     \tchmod +x ~/.local/bin/yt-dlp"
-                );
-                return;
+fn probe_tool(program: &Path, flag: &str, timeout: Duration, home: &Path) -> Result<(), String> {
+    let mut child = Command::new(program).arg(flag).env("HOME", home).stdin(Stdio::null())
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+        .map_err(|error| format!("{} could not start: {error}", program.display()))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(format!("{} is invalid or incomplete ({status}); reinstall it", program.display())),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            outcome => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(match outcome {
+                    Err(error) => format!("{} probe failed: {error}", program.display()),
+                    _ => format!("{} version check timed out", program.display()),
+                });
             }
         }
     }
-
-    configure_ytdlp_js_runtime(home);
 }
 
-/// yt-dlp needs a JavaScript runtime (deno or node) for YouTube signature
-/// extraction since late 2024. Detect whichever is on PATH and pin it in
-/// `~/.config/yt-dlp/config` so the app's `yt-dlp` calls don't need extra
-/// flags. Preserve any user-authored lines already in the config.
-fn configure_ytdlp_js_runtime(home: &str) {
-    let runtime = if Command::new("deno").arg("--version").output().is_ok() {
-        "deno"
-    } else if Command::new("node").arg("--version").output().is_ok() {
-        "node"
-    } else {
-        eprintln!(
-            "WARNING: no JavaScript runtime (deno / node) found. YouTube \
-             downloads may be limited. Install one with your package manager \
-             and re-run the app."
-        );
-        return;
-    };
+fn validate_media_tools(home: &Path, path: &std::ffi::OsStr, uid: u32, timeout: Duration) -> Result<(), String> {
+    for (name, flag) in [("yt-dlp", "--version"), ("ffmpeg", "-version")] {
+        let tool = tool_on_path(name, path, uid).ok_or_else(|| format!(
+            "Missing or unsafe {name}. Install yt-dlp, FFmpeg and Node or Deno with your package manager or the LDM installer; startup never downloads executables."
+        ))?;
+        probe_tool(&tool, flag, timeout, home)?;
+    }
+    for runtime in ["deno", "node"] {
+        if let Some(tool) = tool_on_path(runtime, path, uid) {
+            if probe_tool(&tool, "--version", timeout, home).is_ok() {
+                return Ok(());
+            }
+        }
+    }
+    Err("Missing or invalid JavaScript runtime. Install Node or Deno with your package manager or the LDM installer.".into())
+}
 
-    let config_dir = PathBuf::from(home).join(".config").join("yt-dlp");
-    let config_file = config_dir.join("config");
-    let _ = fs::create_dir_all(&config_dir);
+/// Pass these arguments on each app-owned yt-dlp invocation, never persist
+/// options into the user's shared ~/.config/yt-dlp/config.
+pub(crate) fn ytdlp_runtime_args() -> Vec<String> {
+    let path = env::var_os("PATH").unwrap_or_default();
+    let Ok(uid) = current_uid() else { return vec!["--no-mtime".into()]; };
+    runtime_args_for_path(&path, uid)
+}
 
-    let existing: Vec<String> = match fs::read_to_string(&config_file) {
-        Ok(s) => s
-            .lines()
-            .filter(|l| {
-                let t = l.trim_start();
-                !t.starts_with("--js-runtimes") && !t.starts_with("--no-mtime")
-            })
-            .map(String::from)
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-
-    let mut lines = vec![format!("--js-runtimes {runtime}"), "--no-mtime".to_string()];
-    lines.extend(existing.into_iter().filter(|l| !l.is_empty()));
-
-    let _ = fs::write(&config_file, lines.join("\n") + "\n");
+fn runtime_args_for_path(path: &std::ffi::OsStr, uid: u32) -> Vec<String> {
+    let mut args = vec!["--no-mtime".to_string()];
+    for runtime in ["deno", "node"] {
+        if let Some(tool) = tool_on_path(runtime, path, uid) {
+            args.extend(["--js-runtimes".into(), format!("{runtime}:{}", tool.display())]);
+        }
+    }
+    args
 }
 
 /// Linux Unix socket addresses have a small byte limit. Long XDG paths use a
@@ -488,4 +431,210 @@ pub fn resolve_browser_socket_path() -> Result<PathBuf, String> {
         );
     }
     Ok(dir.join("control.sock"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trusted_executable::test_support::Fixture;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn legacy_data_dir_is_adopted_once_and_never_overwrites() {
+        let fixture = Fixture::new();
+        let legacy = fixture.path.join("linux-download-manager-custom");
+        let data = fixture.path.join("linux-download-manager");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("downloads.sqlite3"), "history").unwrap();
+        migrate_legacy_data_dir(&legacy, &data);
+        assert!(!legacy.exists());
+        assert_eq!(fs::read_to_string(data.join("downloads.sqlite3")).unwrap(), "history");
+
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("downloads.sqlite3"), "stale").unwrap();
+        migrate_legacy_data_dir(&legacy, &data);
+        assert_eq!(fs::read_to_string(data.join("downloads.sqlite3")).unwrap(), "history");
+    }
+
+    fn ready_fixture() -> Fixture {
+        let fixture = Fixture::new();
+        fixture.script("bundle/browser_native_host", "exit 0");
+        for name in ["yt-dlp", "ffmpeg", "node"] {
+            fixture.script(&format!("tools/{name}"), "printf '%s\\n' \"$HOME\" >> \"$0.probes\"\nexit 0");
+        }
+        for name in EXTENSION_FILES {
+            let path = fixture.path.join("bundle/_up_/browser/chromium").join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "{}").unwrap();
+        }
+        let firefox = fixture.path.join("bundle/_up_/browser/firefox");
+        fs::create_dir_all(&firefox).unwrap();
+        fs::write(firefox.join("manifest.json"), "{}").unwrap();
+        fs::create_dir_all(fixture.path.join("home/.config/yt-dlp")).unwrap();
+        fs::write(fixture.path.join("home/.config/yt-dlp/config"), "--js-runtimes custom\n--mtime\n# preserve\n").unwrap();
+        fs::create_dir_all(fixture.path.join("data")).unwrap();
+        fixture
+    }
+
+    fn setup(fixture: &Fixture) -> Result<(), String> {
+        setup_at(
+            &fixture.path.join("home"),
+            &fixture.path.join("data"),
+            &fixture.path.join("bundle"),
+            fixture.path.join("tools").as_os_str(),
+            current_uid().unwrap(),
+        )
+    }
+
+    #[test]
+    fn setup_is_once_only_and_preserves_shared_config_and_browser_payloads() {
+        let fixture = ready_fixture();
+        setup(&fixture).unwrap();
+        let home = fixture.path.join("home");
+        assert_eq!(fs::read_to_string(home.join(".config/yt-dlp/config")).unwrap(),
+            "--js-runtimes custom\n--mtime\n# preserve\n");
+        assert_eq!(fs::read_to_string(fixture.path.join("tools/yt-dlp.probes")).unwrap().trim(), home.to_str().unwrap());
+        assert!(home.join("Documents/Linux Download Manager Extension/popup.js").is_file());
+        assert!(home.join("Documents/Linux Download Manager Firefox Extension.zip").is_file());
+        let manifest: serde_json::Value = serde_json::from_slice(&fs::read(home.join(
+            ".mozilla/native-messaging-hosts/com.eko.linuxdownloadmanager.json"
+        )).unwrap()).unwrap();
+        assert_eq!(manifest["allowed_extensions"][0], "ldm-bridge@ekremx25.github.io");
+        let installed = fixture.path.join("data/bin/browser_native_host");
+        assert!(trusted_file(&installed, current_uid().unwrap(), true));
+        fs::remove_file(fixture.path.join("bundle/_up_/browser/chromium/popup.js")).unwrap();
+        fixture.script("tools/yt-dlp", "exit 7");
+        setup(&fixture).unwrap();
+        assert_eq!(fs::read_to_string(fixture.path.join("tools/yt-dlp.probes")).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn missing_failed_and_partial_helpers_never_mark_setup_successful() {
+        let fixture = ready_fixture();
+        let tool = fixture.path.join("tools/yt-dlp");
+        fs::remove_file(&tool).unwrap();
+        assert!(setup(&fixture).unwrap_err().contains("Missing or unsafe yt-dlp"));
+        assert!(!fixture.path.join("data/.setup_done").exists());
+        fixture.script("tools/yt-dlp", "exit 7");
+        assert!(setup(&fixture).unwrap_err().contains("invalid or incomplete"));
+        assert!(!fixture.path.join("data/.setup_done").exists());
+        fs::write(&tool, "truncated executable").unwrap();
+        assert!(setup(&fixture).is_err());
+        assert!(!fixture.path.join("data/.setup_done").exists());
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(setup(&fixture).unwrap_err().contains("Missing or unsafe yt-dlp"));
+        fixture.script("tools/yt-dlp", "exit 0");
+        fs::remove_file(fixture.path.join("tools/ffmpeg")).unwrap();
+        assert!(setup(&fixture).unwrap_err().contains("Missing or unsafe ffmpeg"));
+        assert!(!fixture.path.join("data/.setup_done").exists());
+    }
+
+    #[test]
+    fn per_user_install_uses_native_host_in_app_data() {
+        let fixture = ready_fixture();
+        let packaged = fixture.path.join("bundle/browser_native_host");
+        let installed = fixture.path.join("data/bin/browser_native_host");
+        fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        fs::rename(packaged, &installed).unwrap();
+        install_browser_extension(
+            &fixture.path.join("bundle"),
+            &fixture.path.join("data"),
+            &fixture.path.join("home"),
+        ).unwrap();
+        fs::remove_dir_all(fixture.path.join("bundle/_up_")).unwrap();
+        let previous = fs::read(&installed).unwrap();
+        setup(&fixture).unwrap();
+        assert_eq!(fs::read(&installed).unwrap(), previous);
+        assert!(fixture.path.join("data/.setup_done").is_file());
+        assert!(fixture.path.join("home/Documents/Linux Download Manager Firefox Extension.zip").is_file());
+        fs::remove_file(fixture.path.join("data/.setup_done")).unwrap();
+        fs::remove_file(fixture.path.join("home/Documents/Linux Download Manager Extension/popup.js")).unwrap();
+        assert!(setup(&fixture).unwrap_err().contains("Bundled browser extension is missing"));
+        assert!(!fixture.path.join("data/.setup_done").exists());
+    }
+
+    #[test]
+    fn successful_setup_repairs_partial_host_and_refreshes_changed_package_host() {
+        let fixture = ready_fixture();
+        setup(&fixture).unwrap();
+        let installed = fixture.path.join("data/bin/browser_native_host");
+        fs::write(&installed, "partial").unwrap();
+        setup(&fixture).unwrap();
+        assert_eq!(fs::read(&installed).unwrap(), fs::read(fixture.path.join("bundle/browser_native_host")).unwrap());
+        fixture.script("bundle/browser_native_host", "# updated package\nexit 0");
+        setup(&fixture).unwrap();
+        assert_eq!(fs::read(&installed).unwrap(), fs::read(fixture.path.join("bundle/browser_native_host")).unwrap());
+    }
+
+    #[test]
+    fn missing_shared_config_stays_absent_and_no_download_command_is_started() {
+        let fixture = ready_fixture();
+        let config = fixture.path.join("home/.config/yt-dlp/config");
+        fs::remove_file(&config).unwrap();
+        fixture.script("tools/curl", "printf invoked > \"$0.invoked\"\nexit 99");
+        setup(&fixture).unwrap();
+        assert!(!config.exists());
+        assert!(!fixture.path.join("tools/curl.invoked").exists());
+    }
+
+    #[test]
+    fn resource_failure_does_not_mark_success_and_can_be_retried() {
+        let fixture = ready_fixture();
+        let resource = fixture.path.join("bundle/_up_/browser/chromium/popup.js");
+        fs::remove_file(&resource).unwrap();
+        assert!(setup(&fixture).is_err());
+        assert!(!fixture.path.join("data/.setup_done").exists());
+        fs::write(resource, "{}").unwrap();
+        setup(&fixture).unwrap();
+        assert!(fixture.path.join("data/.setup_done").is_file());
+    }
+
+    #[test]
+    fn hung_tool_is_killed_and_runtime_fallback_requires_success() {
+        let fixture = ready_fixture();
+        let hung = fixture.script("hung", "while :; do :; done");
+        let start = Instant::now();
+        assert!(probe_tool(&hung, "--version", Duration::from_millis(30), &fixture.path)
+            .unwrap_err().contains("timed out"));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        fixture.script("tools/deno", "exit 1");
+        assert!(validate_media_tools(&fixture.path, fixture.path.join("tools").as_os_str(), current_uid().unwrap(), Duration::from_millis(100)).is_ok());
+        fixture.script("tools/node", "exit 1");
+        assert!(setup(&fixture).unwrap_err().contains("JavaScript runtime"));
+        assert!(!fixture.path.join("data/.setup_done").exists());
+    }
+
+    #[test]
+    fn runtime_configuration_is_per_invocation_without_commands_or_config_writes() {
+        let fixture = Fixture::new();
+        let uid = current_uid().unwrap();
+        assert_eq!(runtime_args_for_path(fixture.path.as_os_str(), uid), ["--no-mtime"]);
+        let node = fixture.script("node", "exit 1");
+        assert_eq!(runtime_args_for_path(fixture.path.as_os_str(), uid), [
+            "--no-mtime".to_string(), "--js-runtimes".to_string(), format!("node:{}", node.display()),
+        ]);
+        let deno = fixture.script("deno", "exit 1");
+        let args = runtime_args_for_path(fixture.path.as_os_str(), uid);
+        assert!(args.contains(&format!("deno:{}", deno.display())));
+        assert!(args.contains(&format!("node:{}", node.display())));
+        assert!(!fixture.path.join(".config").exists());
+    }
+
+    #[test]
+    fn atomic_write_rejects_preexisting_temporary_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let target = fixture.path.join("target");
+        fs::write(&target, "untouched").unwrap();
+        let destination = fixture.path.join("destination");
+        let temporary = fixture.path.join(format!(".destination.{}.tmp", std::process::id()));
+        symlink(&target, &temporary).unwrap();
+        assert!(write_atomic(&destination, b"replacement", true).is_err());
+        assert_eq!(fs::read_to_string(target).unwrap(), "untouched");
+        assert!(!destination.exists());
+        fs::remove_file(&temporary).unwrap();
+        write_atomic(&destination, b"complete", true).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"complete");
+        assert!(!temporary.exists());
+    }
 }

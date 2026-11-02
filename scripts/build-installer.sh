@@ -17,7 +17,7 @@ stage="$(mktemp -d)"
 trap 'rm -rf -- "$stage"' EXIT
 package="$stage/$name"
 mkdir -p "$package/bin" "$package/browser/chromium" "$package/browser/firefox" "$package/src-tauri/icons" "$package/docs/images"
-for binary in linux-download-manager-custom browser_native_host; do
+for binary in linux-download-manager browser_native_host; do
   install -m 0755 "${CARGO_TARGET_DIR:-$root/target}/release/$binary" "$package/bin/$binary"
 done
 install -m 0755 install.sh uninstall.sh "$package/"
@@ -95,7 +95,7 @@ ffmpeg.
 
 Update: run install.sh from the newer package.
 Uninstall: bash ./uninstall.sh (history and downloaded files are preserved).
-Installation backs up existing app/extension files and prints the backup path.
+If installation fails, the previous app/extension files are restored automatically.
 HELP
 (cd "$package" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 archive="$root/dist/$name.tar.gz"

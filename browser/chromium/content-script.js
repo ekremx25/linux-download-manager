@@ -123,6 +123,7 @@ function handleFileLinkClick(event){
   const anchor=event.composedPath().find(node=>node?.tagName==='A'&&node.href);
   if(!anchor)return;
   if(replayedFileLinks.has(anchor)){replayedFileLinks.delete(anchor);return;}
+  if(event.isTrusted!==true)return;
   let url;try{url=new URL(anchor.href);}catch{return;}
   if(!/^https?:$/.test(url.protocol))return;
   const fileName=anchor.getAttribute('download')||'';
@@ -409,6 +410,7 @@ function handlePointerDown(event) {
 }
 
 function handleHoverButtonClick(event) {
+  if (event.isTrusted !== true) return;
   event.preventDefault();
   event.stopPropagation();
 
@@ -485,6 +487,7 @@ function showQualityPicker(candidate, anchorElement) {
     btn.classList.add(quality.outputContainer === "mp3" || quality.outputContainer === "m4a" ? "ldm-quality-audio" : "ldm-quality-video");
     btn.addEventListener("pointerdown", (e) => e.stopPropagation());
     btn.addEventListener("click", (event) => {
+      if (event.isTrusted !== true) return;
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
@@ -532,6 +535,7 @@ function showDetectedMediaPicker(candidate, anchorElement, options) {
     button.textContent = option.label;
     button.addEventListener("pointerdown", event => event.stopPropagation());
     button.addEventListener("click", event => {
+      if (event.isTrusted !== true) return;
       event.preventDefault();
       event.stopPropagation();
       closeQualityPicker();
@@ -1008,6 +1012,7 @@ function refreshMediaOverlay() {
       event.stopPropagation();
     });
     button.addEventListener("click", (event) => {
+      if (event.isTrusted !== true) return;
       event.preventDefault();
       event.stopPropagation();
       activeCandidate = target.candidate;
@@ -1126,6 +1131,7 @@ function injectSocialVideoButtons() {
     const button=document.createElement('button');button.type='button';button.className='ldm-site-btn';button.dataset.socialVideo='true';
     button.addEventListener('pointerdown',e=>{e.preventDefault();e.stopPropagation();});
     button.addEventListener('click',e=>{
+      if(e.isTrusted!==true)return;
       e.preventDefault();e.stopPropagation();
       const candidate=socialVideoCandidate(video);
       if(!candidate){showToast('Open this video or reel in its own page, then try again.','error');return;}
@@ -1152,6 +1158,7 @@ function injectRedditButtons() {
     btn.addEventListener("mouseleave", () => btn.style.setProperty("opacity", "0.85", "important"));
     btn.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); }, true);
     btn.addEventListener("click", (e) => {
+      if (e.isTrusted !== true) return;
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
@@ -1243,6 +1250,7 @@ function injectTwitterButtons() {
       e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
     }, true);
     btn.addEventListener('click', e => {
+      if (e.isTrusted !== true) return;
       e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
       // Resolve again on click: virtualized timelines can reuse player shells.
       const tweet = videoContainer.closest('article');
@@ -1314,6 +1322,7 @@ function injectYouTubeButton() {
   }, true);
 
   btn.addEventListener("click", (e) => {
+    if (e.isTrusted !== true) return;
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
@@ -1391,6 +1400,7 @@ function injectEmbeddedPlayerButtons() {
       event.preventDefault(); event.stopPropagation();
     });
     button.addEventListener("click", event => {
+      if (event.isTrusted !== true) return;
       event.preventDefault(); event.stopPropagation();
       const current = candidateFromPlayerFrame(frame);
       if (current) { activeCandidate = current; triggerCaptureOnce(current, button); }

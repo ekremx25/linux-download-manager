@@ -14,13 +14,13 @@ export srcdir="$tmp/src" pkgdir="$tmp/pkg"
 mkdir -p "$srcdir/target/release" "$pkgdir"
 ln -s "$root" "$srcdir/linux-download-manager"
 cp "$recipe/linux-download-manager.desktop" "$srcdir/"
-for bin in linux-download-manager-custom browser_native_host; do
+for bin in linux-download-manager browser_native_host; do
   printf '#!/bin/sh\nexit 0\n' > "$srcdir/target/release/$bin"
 done
 package
-[[ $(readlink "$pkgdir/usr/bin/linux-download-manager") == /usr/lib/linux-download-manager/linux-download-manager-custom ]]
+[[ $(readlink "$pkgdir/usr/bin/linux-download-manager") == /usr/lib/linux-download-manager/linux-download-manager ]]
 [[ $(readlink "$pkgdir/usr/lib/linux-download-manager/_up_/browser") == /usr/share/linux-download-manager/browser ]]
-for bin in linux-download-manager-custom browser_native_host; do
+for bin in linux-download-manager browser_native_host; do
   [[ -x "$pkgdir/usr/lib/linux-download-manager/$bin" ]]
 done
 for file in browser/chromium/manifest.json browser/firefox/manifest.json; do

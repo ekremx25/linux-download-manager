@@ -61,9 +61,8 @@ function bind(){
   document.addEventListener('contextmenu',e=>{const row=e.target.closest?.('.download-row.item');if(row){e.preventDefault();openContextMenu(Number(row.dataset.id),e.clientX,e.clientY);}});
   document.addEventListener('click',e=>{if(!e.target.closest?.('#context-menu'))hideContextMenu();});
   document.addEventListener('keydown',e=>{
-    if(e.key==='Escape')hideContextMenu();
+    if(e.key==='Escape')hideContextMenu(true);
     if(e.ctrlKey&&e.key.toLowerCase()==='n'){e.preventDefault();openAdd();}
-    if(['ArrowDown','ArrowUp'].includes(e.key)&&!e.target.isContentEditable&&!['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)){e.preventDefault();focusAdjacentRow(e.key==='ArrowDown'?1:-1);}
   });
 }
 async function openAdd(){await safe(()=>invoke('show_add_download_window'));}
@@ -98,8 +97,8 @@ async function saveSettings(){
   try{await saveCaptureRules();await invoke('update_app_settings',{features:{transfer:{connections:Number($('settings-connections').value),maxHeight:Number($('settings-height').value),container:$('settings-container').value},showDetailOnStart:$('settings-show-detail').checked,autoCloseDetail:$('settings-auto-close').checked,showVideoQualityMenu:$('settings-quality-menu').checked},maxConcurrentDownloads:Number(count.value),defaultBandwidthLimitKbps:speedLimitKibs(),desktopNotificationsEnabled:$('settings-desktop-notifications').checked,startOnLogin:$('settings-start-on-login').checked});$('settings-panel').hidden=true;$('toggle-settings').setAttribute('aria-expanded','false');setNotice($('notice'),'Settings saved.');}catch(e){setNotice($('notice'),String(e),'error');}finally{$('save-settings').disabled=false;}
 }
 async function loadDownloads(){
-  if(listLoading||!isTauri)return;listLoading=true;
-  try{const list=await invoke('list_downloads');const serialized=JSON.stringify(list);if(serialized!==lastList){lastList=serialized;state.downloads=list;const ids=new Set(list.map(d=>d.id));for(const id of state.selected)if(!ids.has(id))state.selected.delete(id);for(const id of state.live.keys())if(!ids.has(id))state.live.delete(id);render();}}catch(e){setNotice($('notice'),String(e),'error');}finally{listLoading=false;}
+  if(listLoading||!isTauri)return;listLoading=true;const liveAtRequest=new Map(state.live);
+  try{const list=await invoke('list_downloads');let reconciled=false;for(const d of list){if(d.status==='queued'&&state.live.get(d.id)?.status==='paused'&&state.live.get(d.id)===liveAtRequest.get(d.id)){state.live.delete(d.id);reconciled=true;}}const serialized=JSON.stringify(list);if(serialized!==lastList||reconciled){lastList=serialized;state.downloads=list;const ids=new Set(list.map(d=>d.id));for(const id of state.selected)if(!ids.has(id))state.selected.delete(id);for(const id of state.live.keys())if(!ids.has(id))state.live.delete(id);render();}}catch(e){setNotice($('notice'),String(e),'error');}finally{listLoading=false;}
 }
 async function batch(command,selectedOnly=false){
   if(actionBusy)return;actionBusy=true;updateSelection();
@@ -135,16 +134,16 @@ function displayedSize(d){return d.totalBytes?formatBytes(d.totalBytes):d.status
 function rowHtml(d){
   const live=state.live.get(d.id)||{},cat=categoryFor(d),error=d.errorMessage;
   return `<div class="download-row item ${state.selected.has(d.id)?'selected':''}" role="row" data-id="${d.id}" tabindex="0">
-  <input type="checkbox" ${state.selected.has(d.id)?'checked':''} aria-label="Select ${escapeHtml(d.fileName)}">
-  <div class="file-cell"><span class="file-icon">${categoryIcon(cat)}</span><div><div class="file-name" title="${escapeHtml(d.fileName)}">${escapeHtml(d.fileName)}</div><div class="file-kind ${error?'error-text':''}" title="${escapeHtml(error||'')}">${escapeHtml(error||labels[cat]||'File')}</div></div></div>
-  <span data-cell="size" data-label="Size">${displayedSize(d)}</span>
-  <div class="status-cell"><span class="status-line" data-cell="status">${progressText(d)}</span><div class="progress ${d.status}" data-cell="progress-track"><i data-cell="progress" style="width:${progressOf(d)}%"></i></div></div>
-  <span data-cell="speed" data-label="Speed">${speedFor(d,live)}</span><span data-cell="eta" data-label="Time left" title="Estimate for the current transfer; video/audio merging time is not included.">${etaFor(d,live)}</span>
-  <div class="row-actions">${canPause(d)?'<button class="icon-button" data-action="pause_download" title="Pause" aria-label="Pause">Ⅱ</button>':''}${canResume(d)?'<button class="icon-button" data-action="resume_download" title="Resume / retry" aria-label="Resume / retry">▶</button>':''}<button class="icon-button" data-action="folder" title="Show in folder" aria-label="Show in folder">▱</button><button class="icon-button" data-action="detail" title="Details" aria-label="Details">ⓘ</button></div></div>`;
+  <div role="cell"><input type="checkbox" ${state.selected.has(d.id)?'checked':''} aria-label="Select ${escapeHtml(d.fileName)}"></div>
+  <div class="file-cell" role="cell"><span class="file-icon">${categoryIcon(cat)}</span><div><div class="file-name" title="${escapeHtml(d.fileName)}">${escapeHtml(d.fileName)}</div><div class="file-kind ${error?'error-text':''}" title="${escapeHtml(error||'')}">${escapeHtml(error||labels[cat]||'File')}</div></div></div>
+  <span role="cell" data-cell="size" data-label="Size">${displayedSize(d)}</span>
+  <div class="status-cell" role="cell"><span class="status-line" data-cell="status">${progressText(d)}</span><div class="progress ${d.status}" data-cell="progress-track"><i data-cell="progress" style="width:${progressOf(d)}%"></i></div></div>
+  <span role="cell" data-cell="speed" data-label="Speed">${speedFor(d,live)}</span><span role="cell" data-cell="eta" data-label="Time left" title="Estimate for the current transfer; video/audio merging time is not included.">${etaFor(d,live)}</span>
+  <div class="row-actions" role="cell">${canPause(d)?'<button class="icon-button" data-action="pause_download" title="Pause" aria-label="Pause">Ⅱ</button>':''}${canResume(d)?'<button class="icon-button" data-action="resume_download" title="Resume / retry" aria-label="Resume / retry">▶</button>':''}<button class="icon-button" data-action="folder" title="Show in folder" aria-label="Show in folder">▱</button><button class="icon-button" data-action="detail" title="Details" aria-label="Details">ⓘ</button></div></div>`;
 }
 function attachRows(){document.querySelectorAll('.download-row.item').forEach(row=>{
   const id=Number(row.dataset.id);row.ondblclick=e=>{if(!e.target.closest('button,input'))openDetail(id);};
-  row.onkeydown=e=>{if(e.key==='Enter'&&e.target===row){e.preventDefault();openDetail(id);}};
+  row.onkeydown=e=>{if(e.target!==row)return;if(e.key==='Enter'){e.preventDefault();openDetail(id);}else if(['ArrowDown','ArrowUp'].includes(e.key)){e.preventDefault();focusAdjacentRow(e.key==='ArrowDown'?1:-1);}else if(e.key==='ContextMenu'||(e.shiftKey&&e.key==='F10')){e.preventDefault();const rect=row.getBoundingClientRect();openContextMenu(id,rect.left,rect.bottom);}};
   row.querySelector('input').onchange=e=>{if(e.target.checked)state.selected.add(id);else state.selected.delete(id);row.classList.toggle('selected',e.target.checked);updateSelection();};
   row.querySelectorAll('[data-action]').forEach(b=>b.onclick=async()=>{if(b.dataset.action==='detail')return openDetail(id);b.disabled=true;await safe(()=>invoke(b.dataset.action==='folder'?'open_download_folder':b.dataset.action,{id}));b.disabled=false;await loadDownloads();});
 });}
@@ -229,16 +228,25 @@ async function deleteFiles(ids){
   actionBusy=false;lastList='';await loadDownloads();updateSelection();
   setNotice($('notice'),failures.length?failures.join('\n'):`${targets.length} files deleted and removed from the list.`,failures.length?'error':'');
 }
+let contextMenuReturnFocus=null;
 function ensureContextMenu(){
-  let menu=$('context-menu');if(menu)return menu;menu=document.createElement('div');menu.id='context-menu';menu.className='context-menu';menu.hidden=true;menu.setAttribute('role','menu');document.body.appendChild(menu);
-  menu.addEventListener('click',async e=>{const b=e.target.closest('[data-menu-action]');if(!b||b.disabled)return;const id=state.contextMenuId,action=b.dataset.menuAction;hideContextMenu();if(action==='detail')await openDetail(id);else if(action==='clear')await clearDownload(id);else if(action==='delete-files')await deleteDownloadFiles(id);else await safe(()=>invoke(action==='folder'?'open_download_folder':action,{id}));await loadDownloads();});return menu;
+  let menu=$('context-menu');if(menu)return menu;menu=document.createElement('div');menu.id='context-menu';menu.className='context-menu';menu.hidden=true;menu.setAttribute('role','menu');menu.setAttribute('aria-label','Download actions');document.body.appendChild(menu);
+  menu.addEventListener('keydown',e=>{
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideContextMenu(true);return;}
+    if(e.key==='Tab'){hideContextMenu(true);return;}
+    if(!['ArrowDown','ArrowUp','Home','End'].includes(e.key))return;
+    e.preventDefault();e.stopPropagation();const items=[...menu.querySelectorAll('[role="menuitem"]:not(:disabled)')];if(!items.length)return;
+    const index=items.indexOf(document.activeElement);const next=e.key==='Home'?0:e.key==='End'?items.length-1:(index+(e.key==='ArrowDown'?1:-1)+items.length)%items.length;items[next].focus();
+  });
+  menu.addEventListener('click',async e=>{const b=e.target.closest('[data-menu-action]');if(!b||b.disabled)return;const id=state.contextMenuId,action=b.dataset.menuAction;hideContextMenu(true);if(action==='detail')await openDetail(id);else if(action==='clear')await clearDownload(id);else if(action==='delete-files')await deleteDownloadFiles(id);else await safe(()=>invoke(action==='folder'?'open_download_folder':action,{id}));await loadDownloads();});return menu;
 }
 function openContextMenu(id,x,y){
   const d=state.downloads.find(d=>d.id===id);if(!d)return;const row=merged(d),menu=ensureContextMenu();state.contextMenuId=id;
+  const owner=document.querySelector(`.download-row.item[data-id="${id}"]`);contextMenuReturnFocus=owner?.contains(document.activeElement)?document.activeElement:owner;
   const items=[['detail','Show details',true],['folder','Show in folder',true],['pause_download','Pause',canPause(row)],['resume_download','Resume / retry',canResume(row)],['cancel_download','Cancel download',canCancel(row)],['clear','Remove from list (keep file)',!canPause(row)],['delete-files','Delete files and remove from list',true]];
-  menu.innerHTML=items.map(([a,t,enabled])=>`<button role="menuitem" data-menu-action="${a}" ${enabled?'':'disabled'}>${t}</button>`).join('');menu.hidden=false;menu.style.left=`${Math.max(6,Math.min(x,window.innerWidth-menu.offsetWidth-6))}px`;menu.style.top=`${Math.max(6,Math.min(y,window.innerHeight-menu.offsetHeight-6))}px`;
+  menu.innerHTML=items.map(([a,t,enabled])=>`<button role="menuitem" tabindex="-1" data-menu-action="${a}" ${enabled?'':'disabled'}>${t}</button>`).join('');menu.hidden=false;menu.style.left=`${Math.max(6,Math.min(x,window.innerWidth-menu.offsetWidth-6))}px`;menu.style.top=`${Math.max(6,Math.min(y,window.innerHeight-menu.offsetHeight-6))}px`;menu.querySelector('[role="menuitem"]:not(:disabled)')?.focus();
 }
-function hideContextMenu(){const menu=$('context-menu');if(menu)menu.hidden=true;state.contextMenuId=null;}
+function hideContextMenu(restoreFocus=false){const menu=$('context-menu');if(!menu||menu.hidden)return;menu.hidden=true;if(restoreFocus){const owner=document.querySelector(`.download-row.item[data-id="${state.contextMenuId}"]`);(contextMenuReturnFocus?.isConnected?contextMenuReturnFocus:owner)?.focus();}contextMenuReturnFocus=null;state.contextMenuId=null;}
 
 
 let captureDefaults=[],captureLoaded=false;

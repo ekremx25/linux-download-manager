@@ -172,15 +172,20 @@ pub async fn resume_download(
         return Err("Only paused or failed downloads can be resumed".to_string());
     }
     let mut job = state.resume_job(&record)?;
-    // Explicit Resume should start now, not wait for an old schedule.
-    job.scheduled_at = None;
-    state.storage.set_status(
+    // Persist both schedule representations and status before a restart or worker
+    // can observe this resume. Publish queued before enqueue can start a worker.
+    state.storage.prepare_resume(&mut job)?;
+    state.emit_download_event(
+        &app_handle,
         id,
-        "queued",
-        record.downloaded_bytes,
-        job.total_bytes_hint,
-        None,
-    )?;
+        DownloadEventUpdate {
+            status: "queued",
+            downloaded_bytes: record.downloaded_bytes,
+            total_bytes: job.total_bytes_hint,
+            active_parts: Some(0),
+            ..Default::default()
+        },
+    );
     state.enqueue_download(&app_handle, job)?;
 
     state.storage.get_download(id)
@@ -302,12 +307,7 @@ pub async fn download_detail(
             download.total_bytes,
         )
         .await?;
-    let resume_supported = download.downloaded_bytes > 0
-        || segments.len() > 1
-        || matches!(
-            download.status.as_str(),
-            "paused" | "in_progress" | "queued"
-        );
+    let resume_supported = state.resume_job(&download)?.resumable_hint;
     let media_transfer =
         crate::download::read_media_progress(std::path::Path::new(&download.save_path)).await;
     Ok(DownloadDetail {

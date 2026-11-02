@@ -29,7 +29,7 @@ Linux Download Manager — per-user installer
   ./install.sh --skip-build     Install existing target/release binaries
   ./install.sh --help           Show this help
 
-Installation backs up existing files and preserves history and downloads.
+Installation preserves history and downloads; failed installs are rolled back.
 Do not run with sudo. Sudo is only used for missing system dependencies.
 HELP
 }
@@ -59,8 +59,9 @@ die()    { echo -e "${BOLD}${RED}✗${RESET}  $*" >&2; exit 1; }
 # ── Paths ─────────────────────────────────────────────────────────────────────
 INSTALL_HOME="${LDM_INSTALL_HOME:-${HOME}}"
 BIN_DIR="${INSTALL_HOME}/.local/bin"
+CONFIG_DIR="${XDG_CONFIG_HOME:-${INSTALL_HOME}/.config}"
 export PATH="${INSTALL_HOME}/.cargo/bin:${BIN_DIR}:${PATH}"
-APP_DATA_DIR="${XDG_DATA_HOME:-${INSTALL_HOME}/.local/share}/linux-download-manager-custom"
+APP_DATA_DIR="${XDG_DATA_HOME:-${INSTALL_HOME}/.local/share}/linux-download-manager"
 DESKTOP_DIR="${XDG_DATA_HOME:-${INSTALL_HOME}/.local/share}/applications"
 ICON_DIR="${XDG_DATA_HOME:-${INSTALL_HOME}/.local/share}/icons/hicolor/256x256/apps"
 EXT_DIR="${INSTALL_HOME}/Documents/Linux Download Manager Extension"
@@ -82,7 +83,25 @@ else
 fi
 
 tmp_dir=""
-trap 'if [[ -n "$tmp_dir" && -d "$tmp_dir" ]]; then rm -rf -- "$tmp_dir"; fi' EXIT
+TRANSACTION_ACTIVE=0
+INSTALL_FILES=()
+TEMP_FILES=()
+cleanup() {
+  local result=$?
+  trap - EXIT
+  if [[ "$TRANSACTION_ACTIVE" == 1 ]]; then
+    warn "Installation failed; restoring previous files from $BACKUP_DIR"
+    if rollback_installation; then rm -rf -- "$BACKUP_DIR"
+    else warn "Rollback incomplete; keep the backup at $BACKUP_DIR for recovery."; fi
+  fi
+  local file
+  for file in "${TEMP_FILES[@]}"; do rm -f -- "$file" || true; done
+  if [[ -n "$tmp_dir" && -d "$tmp_dir" ]]; then rm -rf -- "$tmp_dir"; fi
+  exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 if [[ -z "${REPO_DIR}" || ( ! -f "${REPO_DIR}/src-tauri/Cargo.toml" && ! -d "${REPO_DIR}/bin" ) ]]; then
   if [[ "$CHECK_ONLY" == 1 ]]; then usage; exit 0; fi
   command -v git >/dev/null || die "Install git first."
@@ -154,7 +173,7 @@ ensure_system_libs() {
 ensure_runtime_libs() {
   command -v ldd >/dev/null || die "Install ldd (glibc tools) before running this package."
   local report
-  report="$(ldd "$BINARY_SOURCE/linux-download-manager-custom" 2>&1)" || true
+  report="$(ldd "$BINARY_SOURCE/linux-download-manager" 2>&1)" || true
   if [[ "$report" == *"not found"* ]]; then
     log "Installing missing runtime libraries…"
     if command -v pacman >/dev/null 2>&1; then
@@ -167,7 +186,7 @@ ensure_runtime_libs() {
       die "Install GTK3 and WebKitGTK 4.1 runtime libraries, then try again."
     fi
   fi
-  for binary in linux-download-manager-custom browser_native_host; do
+  for binary in linux-download-manager browser_native_host; do
     report="$(ldd "$BINARY_SOURCE/$binary" 2>&1)" || die "Cannot check package compatibility: $report"
     [[ "$report" != *"not found"* ]] || die "This package is incompatible with your system. Install from source instead. Details: $report"
   done
@@ -184,7 +203,7 @@ build_binary() {
 install_binary() {
   log "Installing binary → ${BIN_DIR}/linux-download-manager"
   mkdir -p "${BIN_DIR}" "${APP_DATA_DIR}/bin"
-  install_atomic 0755 "${BINARY_SOURCE}/linux-download-manager-custom" "${BIN_DIR}/linux-download-manager"
+  install_atomic 0755 "${BINARY_SOURCE}/linux-download-manager" "${BIN_DIR}/linux-download-manager"
   install_atomic 0755 "${BINARY_SOURCE}/browser_native_host" "${NATIVE_HOST_BIN}"
 }
 
@@ -200,8 +219,14 @@ install_extension() {
   for file in service-worker.js player-manifest-observer.js youtube-audio-observer.js content-script.js content-style.css popup.html popup.js popup.css; do
     install_atomic 0644 "browser/chromium/$file" "${FIREFOX_EXT_DIR}/$file"
   done
-  "${BIN_DIR}/linux-download-manager" --package-firefox-extension "${FIREFOX_EXT_DIR}" "${FIREFOX_ZIP}" \
+  local temporary
+  temporary="$(mktemp --suffix=.zip "${FIREFOX_ZIP}.new.XXXXXX")"
+  # The packager uses output.with_extension("zip.tmp"); retain the unique stem.
+  TEMP_FILES+=("$temporary" "$temporary.tmp")
+  "${BIN_DIR}/linux-download-manager" --package-firefox-extension "${FIREFOX_EXT_DIR}" "$temporary" \
     || die "Could not create the Firefox extension ZIP file."
+  [[ -s "$temporary" ]] || die "Firefox extension ZIP is empty."
+  mv -fT -- "$temporary" "$FIREFOX_ZIP"
   info "    Firefox ZIP → ${FIREFOX_ZIP}"
 }
 
@@ -210,7 +235,7 @@ install_desktop_entry() {
   mkdir -p "${DESKTOP_DIR}" "${ICON_DIR}"
   install_atomic 0644 "src-tauri/icons/icon.png" "${ICON_DIR}/linux-download-manager.png"
 
-  cat > "${DESKTOP_DIR}/linux-download-manager.desktop" <<EOF
+  write_atomic 0644 "${DESKTOP_DIR}/linux-download-manager.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
 Type=Application
@@ -218,7 +243,7 @@ Name=Linux Download Manager
 Comment=IDM-inspired download manager with YouTube/Facebook/Twitter/Reddit support
 Exec="${BIN_DIR}/linux-download-manager" %U
 Icon=linux-download-manager
-StartupWMClass=linux-download-manager-custom
+StartupWMClass=linux-download-manager
 Terminal=false
 Categories=Network;FileTransfer;
 EOF
@@ -233,17 +258,31 @@ install_ytdlp_and_deps() {
   log "Installing yt-dlp and its runtime dependencies"
 
   # yt-dlp itself — drop a single-file binary into ~/.local/bin.
-  local ytdlp_path="${BIN_DIR}/yt-dlp"
-  if ! command -v yt-dlp >/dev/null 2>&1 && [[ ! -x "${ytdlp_path}" ]]; then
+  local ytdlp_path="${BIN_DIR}/yt-dlp" existing_ytdlp
+  existing_ytdlp="$(command -v yt-dlp || true)"
+  if [[ ! -f "$existing_ytdlp" || ! -x "$existing_ytdlp" ]]; then
     info "    fetching yt-dlp release…"
-    if curl -fL --progress-bar \
-        -o "${ytdlp_path}" \
-        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"; then
-      chmod +x "${ytdlp_path}"
-      info "    yt-dlp → ${ytdlp_path} ($(${ytdlp_path} --version 2>/dev/null || echo "??"))"
-    else
-      warn "yt-dlp download failed. YouTube/social media downloads will be disabled."
-    fi
+    local temporary checksums expected actual
+    temporary="$(mktemp "${ytdlp_path}.new.XXXXXX")"
+    TEMP_FILES+=("$temporary")
+    checksums="$(mktemp "${ytdlp_path}.new.XXXXXX")"
+    TEMP_FILES+=("$checksums")
+    local release="https://github.com/yt-dlp/yt-dlp/releases/latest/download"
+    local curl_options=(--fail --location --proto '=https' --proto-redir '=https'
+                        --connect-timeout 15 --max-time 180 --retry 2 --retry-max-time 240)
+    curl "${curl_options[@]}" --max-filesize 52428800 --output "$temporary" "$release/yt-dlp" \
+      || die "yt-dlp download failed; no helper was published."
+    curl "${curl_options[@]}" --max-filesize 1048576 --output "$checksums" "$release/SHA2-256SUMS" \
+      || die "yt-dlp checksum download failed; no helper was published."
+    expected="$(sed -n 's/^\([[:xdigit:]]\{64\}\)  yt-dlp$/\1/p' "$checksums")"
+    actual="$(sha256sum "$temporary")"
+    actual="${actual%% *}"
+    [[ -s "$temporary" && "$expected" =~ ^[[:xdigit:]]{64}$ && "${actual,,}" == "${expected,,}" ]] \
+      || die "yt-dlp checksum mismatch; no helper was published."
+    # The upstream HTTPS checksum provides integrity, not independent authenticity.
+    chmod 0755 "$temporary"
+    mv -fT -- "$temporary" "$ytdlp_path"
+    info "    yt-dlp → ${ytdlp_path} (upstream HTTPS SHA256 verified)"
   else
     info "    yt-dlp already on PATH — skipping"
   fi
@@ -285,33 +324,19 @@ install_ytdlp_and_deps() {
     fi
   fi
 
-  # Persistent yt-dlp config so every invocation (including the one from the
-  # LDM binary) uses the detected runtime without needing extra flags.
-  local config_dir="${INSTALL_HOME}/.config/yt-dlp"
-  local config_file="${config_dir}/config"
-  mkdir -p "${config_dir}"
-  # Preserve any existing config the user may have hand-tuned, but make sure
-  # the js-runtimes line is present and correct.
-  # Keep user configuration intact and do not append duplicate options.
-  touch "${config_file}"
-  if ! grep -q '^--js-runtimes' "${config_file}"; then
-    printf '\n--js-runtimes %s\n' "${js_runtime}" >> "${config_file}"
-  fi
-  if ! grep -q '^--no-mtime' "${config_file}"; then
-    printf '\n--no-mtime\n' >> "${config_file}"
-  fi
-  info "    yt-dlp config → ${config_file} (js-runtime: ${js_runtime})"
+  # Runtime options belong to LDM's invocation, not the user's shared config.
+  info "    yt-dlp JavaScript runtime available: ${js_runtime}"
 }
 
 install_native_host() {
   log "Writing Chromium native messaging manifest"
   local browsers=(
-    "${INSTALL_HOME}/.config/google-chrome/NativeMessagingHosts"
-    "${INSTALL_HOME}/.config/chromium/NativeMessagingHosts"
-    "${INSTALL_HOME}/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts"
-    "${INSTALL_HOME}/.config/microsoft-edge-dev/NativeMessagingHosts"
-    "${INSTALL_HOME}/.config/microsoft-edge/NativeMessagingHosts"
-    "${INSTALL_HOME}/.config/vivaldi/NativeMessagingHosts"
+    "${CONFIG_DIR}/google-chrome/NativeMessagingHosts"
+    "${CONFIG_DIR}/chromium/NativeMessagingHosts"
+    "${CONFIG_DIR}/BraveSoftware/Brave-Browser/NativeMessagingHosts"
+    "${CONFIG_DIR}/microsoft-edge-dev/NativeMessagingHosts"
+    "${CONFIG_DIR}/microsoft-edge/NativeMessagingHosts"
+    "${CONFIG_DIR}/vivaldi/NativeMessagingHosts"
   )
 
   local payload
@@ -331,14 +356,14 @@ EOF
     local parent="$(dirname "${browser_root}")"
     if [[ -d "${parent}" ]]; then
       mkdir -p "${browser_root}"
-      echo "${payload}" > "${browser_root}/${NATIVE_HOST_NAME}.json"
+      write_atomic 0644 "${browser_root}/${NATIVE_HOST_NAME}.json" <<< "$payload"
       info "    → $(basename "${parent}")"
     fi
   done
   if [[ -d "${INSTALL_HOME}/.mozilla" ]] || command -v firefox >/dev/null 2>&1; then
     local firefox_host_dir="${INSTALL_HOME}/.mozilla/native-messaging-hosts"
     mkdir -p "${firefox_host_dir}"
-    cat > "${firefox_host_dir}/${NATIVE_HOST_NAME}.json" <<EOF
+    write_atomic 0644 "${firefox_host_dir}/${NATIVE_HOST_NAME}.json" <<EOF
 {
   "name": "${NATIVE_HOST_NAME}",
   "description": "Native messaging bridge for Linux Download Manager",
@@ -379,34 +404,64 @@ final_instructions() {
 install_atomic() {
   local mode="$1" source="$2" destination="$3" temporary
   temporary="$(mktemp "${destination}.new.XXXXXX")"
+  TEMP_FILES+=("$temporary")
   if ! install -m "$mode" "$source" "$temporary"; then rm -f -- "$temporary"; return 1; fi
-  mv -f -- "$temporary" "$destination"
+  mv -fT -- "$temporary" "$destination"
 }
 
+write_atomic() {
+  local mode="$1" destination="$2" temporary
+  temporary="$(mktemp "${destination}.new.XXXXXX")"
+  TEMP_FILES+=("$temporary")
+  cat > "$temporary"
+  chmod "$mode" "$temporary"
+  mv -fT -- "$temporary" "$destination"
+}
+
+# Earlier releases kept history under a "-custom" folder; adopt it once.
+migrate_legacy_data_dir() {
+  local legacy="${APP_DATA_DIR}-custom"
+  if [[ ! -e "$APP_DATA_DIR" && -d "$legacy" && ! -L "$legacy" ]]; then
+    mv -T -- "$legacy" "$APP_DATA_DIR"
+    log "Moved app data to $APP_DATA_DIR"
+  fi
+}
+
+# Previous files are kept only for rollback and removed once installation succeeds.
 backup_installation() {
-  BACKUP_DIR="${APP_DATA_DIR}/backups/$(date +%Y%m%d-%H%M%S)-$$"
-  mkdir -p "$BACKUP_DIR"
-  local file
-  for file in "$BIN_DIR/linux-download-manager" "$NATIVE_HOST_BIN" \
-      "$DESKTOP_DIR/linux-download-manager.desktop" "$ICON_DIR/linux-download-manager.png" \
-      "${INSTALL_HOME}/.config/yt-dlp/config" "$APP_DATA_DIR/.setup_done"; do
-    if [[ -f "$file" ]]; then
+  BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ldm-install.XXXXXX")"
+  INSTALL_FILES=("$BIN_DIR/linux-download-manager" "$NATIVE_HOST_BIN" "$BIN_DIR/yt-dlp"
+    "$DESKTOP_DIR/linux-download-manager.desktop" "$ICON_DIR/linux-download-manager.png"
+    "$APP_DATA_DIR/.setup_done" "$APP_DATA_DIR/uninstall.sh"
+    "$FIREFOX_ZIP" "$INSTALL_HOME/.mozilla/native-messaging-hosts/$NATIVE_HOST_NAME.json")
+  local file browser
+  for file in manifest.json service-worker.js player-manifest-observer.js youtube-audio-observer.js content-script.js content-style.css popup.html popup.js popup.css; do
+    INSTALL_FILES+=("$EXT_DIR/$file" "$FIREFOX_EXT_DIR/$file")
+  done
+  for browser in google-chrome chromium BraveSoftware/Brave-Browser microsoft-edge-dev microsoft-edge vivaldi; do
+    INSTALL_FILES+=("$CONFIG_DIR/$browser/NativeMessagingHosts/$NATIVE_HOST_NAME.json")
+  done
+  for file in "${INSTALL_FILES[@]}"; do
+    [[ ! -d "$file" ]] || die "Installation destination is a directory: $file"
+    if [[ -e "$file" || -L "$file" ]]; then
       mkdir -p "$BACKUP_DIR$(dirname "$file")"
-      cp -p -- "$file" "$BACKUP_DIR$file"
+      cp -a -- "$file" "$BACKUP_DIR$file"
     fi
   done
-  if [[ -d "$EXT_DIR" ]]; then mkdir -p "$BACKUP_DIR$(dirname "$EXT_DIR")"; cp -a -- "$EXT_DIR" "$BACKUP_DIR$EXT_DIR"; fi
-  if [[ -d "$FIREFOX_EXT_DIR" ]]; then mkdir -p "$BACKUP_DIR$(dirname "$FIREFOX_EXT_DIR")"; cp -a -- "$FIREFOX_EXT_DIR" "$BACKUP_DIR$FIREFOX_EXT_DIR"; fi
-  if [[ -f "$FIREFOX_ZIP" ]]; then mkdir -p "$BACKUP_DIR$(dirname "$FIREFOX_ZIP")"; cp -a -- "$FIREFOX_ZIP" "$BACKUP_DIR$FIREFOX_ZIP"; fi
-  if [[ -f "${INSTALL_HOME}/.mozilla/native-messaging-hosts/${NATIVE_HOST_NAME}.json" ]]; then
-    local firefox_manifest="${INSTALL_HOME}/.mozilla/native-messaging-hosts/${NATIVE_HOST_NAME}.json"
-    mkdir -p "$BACKUP_DIR$(dirname "$firefox_manifest")"
-    cp -p -- "$firefox_manifest" "$BACKUP_DIR$firefox_manifest"
-  fi
-  while IFS= read -r file; do
-    mkdir -p "$BACKUP_DIR$(dirname "$file")"; cp -p -- "$file" "$BACKUP_DIR$file"
-  done < <(find "${INSTALL_HOME}/.config" -maxdepth 4 -name "${NATIVE_HOST_NAME}.json" -type f 2>/dev/null || true)
-  log "Backup: $BACKUP_DIR"
+  # Arm rollback only after every previous file has been saved successfully.
+  TRANSACTION_ACTIVE=1
+}
+
+rollback_installation() {
+  local file failed=0
+  for file in "${INSTALL_FILES[@]}"; do
+    # Remove only exact owned files, never extension/config directories or user data.
+    if ! rm -f -- "$file"; then failed=1; continue; fi
+    if [[ -e "$BACKUP_DIR$file" || -L "$BACKUP_DIR$file" ]]; then
+      cp -a -- "$BACKUP_DIR$file" "$file" || failed=1
+    fi
+  done
+  return "$failed"
 }
 
 [[ "$(uname -s)" == Linux ]] || die "This installer requires Linux."
@@ -434,7 +489,6 @@ if [[ "$UPDATE" == 1 ]]; then
   branch="$(git symbolic-ref --quiet --short HEAD)" || die "Switch to a Git branch first."
   git rev-parse --verify '@{upstream}' >/dev/null 2>&1 || die "This branch has no upstream tracking branch."
   remote="$(git config "branch.$branch.remote")"
-  git tag "backup-ldm-$(date +%Y%m%d-%H%M%S)-$$"
   git fetch "$remote"
   git merge --ff-only '@{upstream}' || die "Branches have diverged; automatic update stopped. Local commits were preserved."
   # Re-run the updated installer without --update, preserving the other options.
@@ -446,7 +500,7 @@ if [[ "$MODE" != prebuilt && "$SKIP_BUILD" == 0 ]]; then
   else command -v cargo >/dev/null || die "cargo not found (--no-deps)."; fi
   build_binary
 fi
-for binary in linux-download-manager-custom browser_native_host; do
+for binary in linux-download-manager browser_native_host; do
   [[ -x "$BINARY_SOURCE/$binary" ]] || die "Missing executable: $BINARY_SOURCE/$binary"
 done
 for file in manifest.json service-worker.js player-manifest-observer.js youtube-audio-observer.js content-script.js content-style.css popup.html popup.js popup.css; do
@@ -458,6 +512,7 @@ if [[ "$MODE" == prebuilt && -f SHA256SUMS ]]; then
   sha256sum --check --quiet SHA256SUMS || die "Package integrity check failed; nothing was installed."
 fi
 if [[ "$MODE" == prebuilt && "$NO_DEPS" == 0 ]]; then ensure_runtime_libs; fi
+migrate_legacy_data_dir
 backup_installation
 install_binary
 install_extension
@@ -468,8 +523,9 @@ else
   for tool in yt-dlp ffmpeg; do command -v "$tool" >/dev/null || warn "$tool is missing: install it for video downloads."; done
 fi
 # Match the application's setup marker; avoid overwriting browser settings again on launch.
-printf '%s\n' "$NATIVE_HOST_BIN" > "$APP_DATA_DIR/.setup_done"
+write_atomic 0644 "$APP_DATA_DIR/.setup_done" <<< "$NATIVE_HOST_BIN"
 install_atomic 0755 "$REPO_DIR/uninstall.sh" "$APP_DATA_DIR/uninstall.sh"
 final_instructions
-echo "Backup: $BACKUP_DIR"
 echo "Restart the application. Reload the browser extension and refresh the video page."
+TRANSACTION_ACTIVE=0
+rm -rf -- "$BACKUP_DIR"

@@ -1,15 +1,15 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Linux Download Manager Custom",
-  "version": "0.2.9",
-  "identifier": "com.eko.linuxdownloadmanagercustom",
+  "productName": "Linux Download Manager",
+  "version": "0.3.0",
+  "identifier": "com.eko.linuxdownloadmanager",
   "build": {
     "frontendDist": "../ui"
   },
   "app": {
     "withGlobalTauri": true,
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     },
     "windows": [
       {

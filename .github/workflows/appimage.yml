@@ -20,6 +20,15 @@ jobs:
           node-version: '22'
       - name: Install Tauri CLI
         run: npm install --global @tauri-apps/cli@2.12.1
+      - name: Check release version equality
+        run: |
+          node <<'JS'
+          const fs = require('node:fs'), assert = require('node:assert/strict');
+          const cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8').match(/^version = "([^"]+)"$/m)[1];
+          for (const file of ['src-tauri/tauri.conf.json', 'browser/chromium/manifest.json', 'browser/firefox/manifest.json']) {
+            assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).version, cargo, file);
+          }
+          JS
       - name: Build desktop and native bridge
         run: cargo build --release --locked --bins
       - name: Bundle AppImage
@@ -34,13 +43,17 @@ jobs:
           chmod +x "$image"
           "$image" --appimage-extract >/dev/null
           test -x squashfs-root/usr/bin/browser_native_host
-          find squashfs-root -name youtube-audio-observer.js | grep .
+          test -x squashfs-root/usr/bin/linux-download-manager
           mkdir -p dist
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           embedded=$(find squashfs-root -path '*/chromium/manifest.json' -print -quit)
           test -n "$embedded"
-          cmp browser/chromium/manifest.json "$embedded"
-          cmp browser/chromium/content-script.js "$(dirname "$embedded")/content-script.js"
+          for file in manifest.json service-worker.js player-manifest-observer.js youtube-audio-observer.js content-script.js content-style.css popup.html popup.js popup.css; do
+            cmp "browser/chromium/$file" "$(dirname "$embedded")/$file"
+          done
+          firefox=$(find squashfs-root -path '*/firefox/manifest.json' -print -quit)
+          test -n "$firefox"
+          cmp browser/firefox/manifest.json "$firefox"
           cp "$image" "dist/Linux_Download_Manager-${version}-x86_64.AppImage"
           cd dist
           sha256sum *.AppImage > SHA256SUMS-AppImage
@@ -51,9 +64,38 @@ jobs:
           tar -xzf dist/LinuxDownloadManager-*-linux-x86_64.tar.gz -C installer-check
           package=$(find installer-check -mindepth 1 -maxdepth 1 -type d -print -quit)
           (cd "$package" && sha256sum -c SHA256SUMS)
-          cmp browser/chromium/content-script.js "$package/browser/chromium/content-script.js"
+          for file in manifest.json service-worker.js player-manifest-observer.js youtube-audio-observer.js content-script.js content-style.css popup.html popup.js popup.css; do
+            cmp "browser/chromium/$file" "$package/browser/chromium/$file"
+          done
+          cmp browser/firefox/manifest.json "$package/browser/firefox/manifest.json"
+          cmp install.sh "$package/install.sh"
+          cmp uninstall.sh "$package/uninstall.sh"
+          for binary in linux-download-manager browser_native_host; do
+            test -x "$package/bin/$binary"
+            cmp "target/release/$binary" "$package/bin/$binary"
+          done
           cd dist
           sha256sum *.AppImage *.tar.gz > SHA256SUMS
+      - name: Record unsigned build provenance (no publishing or signing)
+        run: |
+          python3 <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          dist = pathlib.Path('dist')
+          artifacts = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                       for p in sorted(dist.iterdir())
+                       if p.name.endswith(('.AppImage', '.tar.gz'))}
+          metadata = {
+              'notice': 'Unsigned build metadata, not an independent authenticity attestation.',
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'commit': os.environ['GITHUB_SHA'],
+              'workflow': os.environ['GITHUB_WORKFLOW'],
+              'run': f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              'rustc': subprocess.check_output(['rustc', '--version'], text=True, timeout=10).strip(),
+              'cargo': subprocess.check_output(['cargo', '--version'], text=True, timeout=10).strip(),
+              'sha256': artifacts,
+          }
+          (dist / 'BUILD-PROVENANCE.json').write_text(json.dumps(metadata, indent=2) + '\n')
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: Linux-Download-Manager-Packages

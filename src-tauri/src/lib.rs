@@ -8,8 +8,10 @@ mod download;
 mod jobs;
 mod library;
 mod platform;
+mod periodic;
 mod preferences;
 mod storage;
+mod trusted_executable;
 
 use app::AppState;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,8 +46,6 @@ fn focus_main_window(app: &tauri::AppHandle) {
 pub fn run() {
     let first_run = platform::is_first_run();
     let start_hidden = std::env::args().any(|arg| arg == "--background");
-    platform::run_first_time_setup();
-
     let state = AppState::bootstrap().unwrap_or_else(|error| {
         panic!("failed to initialize application state: {error}");
     });
@@ -146,14 +146,27 @@ pub fn run() {
                 let _ = window.set_focus();
             }
 
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    let state = app_handle.state::<AppState>();
-                    let _ = state.poll_browser_inbox(&app_handle).await;
-                    let _ = state.schedule_pending(&app_handle);
+            // Only the primary instance reaches setup, after windows and tray
+            // are initialized. Tool probes are bounded and never run on the UI.
+            tauri::async_runtime::spawn_blocking(|| {
+                if let Err(error) = platform::run_first_time_setup() {
+                    eprintln!("First-time setup incomplete: {error}");
                 }
             });
+
+            let scheduler_handle = app_handle.clone();
+            tauri::async_runtime::spawn(periodic::run_periodic(Duration::from_secs(1), move || {
+                let handle = scheduler_handle.clone();
+                async move {
+                    let _ = handle.state::<AppState>().schedule_pending(&handle);
+                }
+            }));
+            tauri::async_runtime::spawn(periodic::run_periodic(Duration::from_secs(1), move || {
+                let handle = app_handle.clone();
+                async move {
+                    let _ = handle.state::<AppState>().poll_browser_inbox(&handle).await;
+                }
+            }));
 
             Ok(())
         })

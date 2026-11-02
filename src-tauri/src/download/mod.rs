@@ -1,9 +1,11 @@
 mod hls;
+#[cfg(test)]
+mod http_identity_tests;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use reqwest::header::{
     ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HeaderMap,
-    RANGE,
+    DATE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE,
 };
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
@@ -205,6 +207,145 @@ struct SegmentedDownloadManifest {
     segments: Vec<SegmentPart>,
 }
 
+// Private, disposable state: never infer identity from a queued length or filename.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum HttpValidator {
+    Etag(String),
+    LastModified(String),
+}
+
+impl HttpValidator {
+    fn from_headers(headers: &HeaderMap) -> Option<Self> {
+        if let Some(value) = headers.get(ETAG) {
+            let value = value.to_str().ok()?;
+            return Self::strong_etag(value).then(|| Self::Etag(value.to_owned()));
+        }
+        // A date is a strong validator only when the origin's Date is at least
+        // 60 seconds later (RFC 9110 section 8.8.2.2). Never use a weak ETag.
+        let modified = headers.get(LAST_MODIFIED)?.to_str().ok()?;
+        let date = headers.get(DATE)?.to_str().ok()?;
+        let modified_time = chrono::DateTime::parse_from_rfc2822(modified).ok()?;
+        let date_time = chrono::DateTime::parse_from_rfc2822(date).ok()?;
+        (date_time.signed_duration_since(modified_time).num_seconds() >= 60)
+            .then(|| Self::LastModified(modified.to_owned()))
+    }
+
+    fn strong_etag(value: &str) -> bool {
+        let bytes = value.as_bytes();
+        bytes.len() >= 2
+            && bytes.first() == Some(&b'"')
+            && bytes.last() == Some(&b'"')
+            && bytes[1..bytes.len() - 1]
+                .iter()
+                .all(|b| *b == 0x21 || (0x23..=0x7e).contains(b))
+    }
+
+    fn value(&self) -> &str {
+        match self {
+            Self::Etag(value) | Self::LastModified(value) => value,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HttpRepresentation {
+    source_url: String,
+    response_url: String,
+    total_bytes: Option<u64>,
+    validator: HttpValidator,
+}
+
+impl HttpRepresentation {
+    fn from_response(url: &Url, response: &reqwest::Response, total: Option<u64>) -> Option<Self> {
+        Some(Self {
+            source_url: url.as_str().to_owned(),
+            response_url: response.url().as_str().to_owned(),
+            total_bytes: total,
+            validator: HttpValidator::from_headers(response.headers())?,
+        })
+    }
+
+    fn check_response(&self, response: &reqwest::Response) -> Result<(), String> {
+        if self.response_url != response.url().as_str() {
+            return Err("Remote representation redirect changed; retry from the beginning".into());
+        }
+        let header = match &self.validator {
+            HttpValidator::Etag(_) => ETAG,
+            HttpValidator::LastModified(_) => LAST_MODIFIED,
+        };
+        // A 206 answering If-Range may omit redundant representation headers.
+        // If supplied, they must agree; If-Range itself guards the omitted case.
+        if response.headers().get(header).is_some_and(|value| {
+            value.to_str().ok() != Some(self.validator.value())
+        }) {
+            return Err("Remote representation changed while downloading".into());
+        }
+        Ok(())
+    }
+}
+
+fn http_identity_path(target: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.ldm-http.json", target.display()))
+}
+
+async fn remove_http_identity(target: &Path) -> Result<(), String> {
+    for path in [http_identity_path(target), http_identity_path(target).with_extension("json.tmp")] {
+        match fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("failed to remove HTTP identity: {error}")),
+        }
+    }
+    Ok(())
+}
+
+async fn load_http_identity(target: &Path) -> Result<Option<HttpRepresentation>, String> {
+    match fs::read(http_identity_path(target)).await {
+        // Invalid/old state has no authority to resume existing bytes.
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("failed to read HTTP identity: {error}")),
+    }
+}
+
+async fn save_http_identity(target: &Path, identity: &HttpRepresentation) -> Result<(), String> {
+    let path = http_identity_path(target);
+    let staging = path.with_extension("json.tmp");
+    let contents = serde_json::to_vec(identity).map_err(|e| e.to_string())?;
+    // URLs may carry credentials. Exclusive creation also refuses a staging
+    // symlink instead of truncating an unrelated file through it.
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+        .open(&staging).await.map_err(|e| format!("failed to create HTTP identity: {e}"))?;
+    let result = async {
+        file.write_all(&contents).await.map_err(|e| format!("failed to write HTTP identity: {e}"))?;
+        file.flush().await.map_err(|e| format!("failed to flush HTTP identity: {e}"))?;
+        fs::rename(&staging, &path).await.map_err(|e| format!("failed to publish HTTP identity: {e}"))
+    }.await;
+    if let Err(error) = result {
+        return match fs::remove_file(&staging).await {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(format!("{error}; failed to remove identity staging file: {cleanup}")),
+        };
+    }
+    Ok(())
+}
+
+async fn send_http_headers(request: reqwest::RequestBuilder) -> Result<reqwest::Response, String> {
+    tokio::time::timeout(SEGMENT_IDLE_TIMEOUT, request.send())
+        .await
+        .map_err(|_| "Server did not respond before the HTTP header timeout".to_owned())?
+        .map_err(|error| format!("HTTP request failed: {error}"))
+}
+
+fn check_identity_encoding(response: &reqwest::Response) -> Result<(), String> {
+    if response.headers().get("content-encoding").is_some_and(|value| {
+        !value.as_bytes().eq_ignore_ascii_case(b"identity")
+    }) {
+        return Err("Server ignored identity encoding; cannot safely use byte offsets".into());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SegmentPart {
     index: usize,
@@ -333,16 +474,16 @@ impl DownloadService {
             });
         }
 
-        let head_response = self.client.head(url.clone()).send().await;
+        let head_response = send_http_headers(
+            self.client.head(url.clone()).header("Accept-Encoding", "identity"),
+        ).await;
         let response = match head_response {
             Ok(response) if response.status().is_success() => response,
-            _ => self
-                .client
-                .get(url.clone())
-                .header(RANGE, "bytes=0-0")
-                .send()
-                .await
-                .map_err(|error| format!("failed to inspect remote file: {error}"))?,
+            _ => send_http_headers(
+                self.client.get(url.clone())
+                    .header("Accept-Encoding", "identity")
+                    .header(RANGE, "bytes=0-0"),
+            ).await.map_err(|error| format!("failed to inspect remote file: {error}"))?,
         };
 
         if !response.status().is_success() && response.status().as_u16() != 206 {
@@ -751,42 +892,65 @@ impl DownloadService {
             total_bytes: total_bytes_hint,
             throttle,
         } = options;
-        let mut request = self
-            .client
-            .get(url.clone())
-            .header("Accept-Encoding", "identity");
-        if requested_resume_from > 0 {
-            request = request.header(RANGE, format!("bytes={requested_resume_from}-"));
+        let temp_path = self.partial_path_for(target_path);
+        let saved_identity = load_http_identity(target_path).await?
+            .filter(|identity| identity.source_url == url.as_str());
+        // Progress persisted by the UI may be ahead of a cancelled buffered writer.
+        // Only bytes really on disk, bound to a saved validator, can be appended.
+        let disk_bytes = match fs::metadata(&temp_path).await {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(format!("failed to inspect partial file: {error}")),
+        };
+        let resume_from = if requested_resume_from > 0 && saved_identity.is_some() {
+            disk_bytes
+        } else {
+            0
+        };
+        let mut request = self.client.get(url.clone()).header("Accept-Encoding", "identity");
+        if let Some(identity) = saved_identity.as_ref().filter(|_| resume_from > 0) {
+            request = request.header(RANGE, format!("bytes={resume_from}-"))
+                .header(IF_RANGE, identity.validator.value());
         }
-
-        let response = request
-            .send()
-            .await
-            .map_err(|error| format!("failed to start download: {error}"))?;
-
-        if !response.status().is_success() && response.status().as_u16() != 206 {
+        let response = send_http_headers(request).await?;
+        let status_code = response.status().as_u16();
+        if ![200, 206].contains(&status_code) {
             return Err(format!(
                 "remote server returned unexpected status while downloading: {}",
                 response.status()
             ));
         }
-
-        let status_code = response.status().as_u16();
-        let actual_resume_from = if requested_resume_from > 0 && status_code == 206 {
-            requested_resume_from
-        } else {
-            0
-        };
+        check_identity_encoding(&response)?;
+        // A failed If-Range yields a complete 200 response: truncate, never append.
+        let actual_resume_from = if status_code == 206 { resume_from } else { 0 };
         let total_bytes = if status_code == 206 {
-            let (start, _, total) = parse_range(response.headers())?;
-            if start != actual_resume_from {
+            let (start, end, total) = parse_range(response.headers())?;
+            if start != actual_resume_from || end != total.saturating_sub(1) {
                 return Err("Server returned an incorrect resume range".into());
+            }
+            if actual_resume_from > 0 {
+                if let Some(identity) = &saved_identity {
+                    identity.check_response(&response)?;
+                    if identity.total_bytes.is_some_and(|size| size != total) {
+                        return Err("Remote representation length changed while resuming".into());
+                    }
+                }
             }
             Some(total)
         } else {
-            parse_content_length(response.headers())
+            response.content_length()
         };
-        let temp_path = self.partial_path_for(target_path);
+        let identity = if actual_resume_from > 0 {
+            saved_identity.map(|mut identity| {
+                identity.total_bytes = total_bytes;
+                identity
+            })
+        } else {
+            HttpRepresentation::from_response(url, &response, total_bytes)
+        };
+        // Invalidate first: a crash between truncation and publication cannot
+        // leave old bytes authorized by a newly saved validator.
+        remove_http_identity(target_path).await?;
         let file = if actual_resume_from > 0 {
             fs::OpenOptions::new()
                 .create(true)
@@ -799,14 +963,22 @@ impl DownloadService {
                 .await
                 .map_err(|error| format!("failed to create temporary file: {error}"))?
         };
+        if let Some(identity) = &identity {
+            save_http_identity(target_path, identity).await?;
+        }
         let mut file = BufWriter::with_capacity(256 * 1024, file);
         let mut stream = response.bytes_stream();
         let mut downloaded_bytes = actual_resume_from;
 
         on_started(actual_resume_from, total_bytes.or(total_bytes_hint), 1)?;
 
-        while let Some(chunk) = stream.next().await {
+        while let Some(chunk) = tokio::time::timeout(SEGMENT_IDLE_TIMEOUT, stream.next())
+            .await.map_err(|_| "Connection stalled while streaming data".to_owned())?
+        {
             let chunk = chunk.map_err(|error| format!("failed while streaming data: {error}"))?;
+            if total_bytes.is_some_and(|total| chunk.len() as u64 > total.saturating_sub(downloaded_bytes)) {
+                return Err("Downloaded data exceeds the server response length".into());
+            }
             if let Some(throttle) = throttle.as_ref() {
                 throttle.acquire(chunk.len() as u64).await;
             }
@@ -834,6 +1006,7 @@ impl DownloadService {
             .await
             .map_err(|error| format!("failed to finalize downloaded file: {error}"))?;
 
+        let _ = remove_http_identity(target_path).await;
         Ok((downloaded_bytes, total_bytes.or(total_bytes_hint), 1))
     }
 
@@ -1302,8 +1475,10 @@ impl DownloadService {
         cmd.arg("-c")
             .arg(include_str!("ytdlp_parallel.py"))
             .arg(&ytdlp_path);
-        cmd.arg("--no-warnings")
+        cmd.arg("--ignore-config")
+            .arg("--no-warnings")
             .arg("--no-playlist")
+            .args(crate::platform::ytdlp_runtime_args())
             .args(transfer.ytdlp_args(format));
         if let Some(limit) = bandwidth_limit_kbps {
             cmd.arg("--limit-rate").arg(format!("{limit}K"));
@@ -1448,6 +1623,7 @@ impl DownloadService {
                 }
             }
         }
+        remove_http_identity(target_path).await?;
         remove_file(&media_progress_path(target_path)).await?;
         remove_file(&media_progress_path(target_path).with_extension("tmp")).await?;
         remove_file(&self.partial_path_for(target_path)).await?;
@@ -1516,12 +1692,33 @@ impl DownloadService {
         Ok(())
     }
 
+    async fn discard_http_partials(
+        &self,
+        target: &Path,
+        manifest: &SegmentedDownloadManifest,
+    ) -> Result<(), String> {
+        // Resolve every legacy/current path before deleting the selector files.
+        let mut paths: Vec<_> = manifest.segments.iter()
+            .map(|segment| self.segment_path_for(target, segment.index)).collect();
+        paths.push(self.partial_path_for(target));
+        paths.push(self.manifest_path_for(target));
+        remove_http_identity(target).await?;
+        for path in paths {
+            match fs::remove_file(path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("failed to discard stale HTTP partial: {error}")),
+            }
+        }
+        Ok(())
+    }
+
     async fn fetch_segment(
         &self,
         url: &Url,
         target: &Path,
         segment: SegmentPart,
-        total: u64,
+        identity: &HttpRepresentation,
         downloaded: Arc<AtomicU64>,
         throttle: Option<Arc<BandwidthThrottle>>,
         mut split_requested: watch::Receiver<bool>,
@@ -1538,6 +1735,7 @@ impl DownloadService {
                 .get(url.clone())
                 .header("Accept-Encoding", "identity")
                 .header(RANGE, format!("bytes={start}-{}", segment.end))
+                .header(IF_RANGE, identity.validator.value())
                 .send();
             let response = tokio::time::timeout(SEGMENT_IDLE_TIMEOUT, request)
                 .await
@@ -1568,8 +1766,10 @@ impl DownloadService {
                     "Expected HTTP 206, received {code}"
                 )));
             }
+            check_identity_encoding(&response).map_err(SegmentFailure::Fatal)?;
+            identity.check_response(&response).map_err(SegmentFailure::Fatal)?;
             let range = parse_range(response.headers()).map_err(SegmentFailure::Fatal)?;
-            if range != (start, segment.end, total) {
+            if range.0 != start || range.1 != segment.end || Some(range.2) != identity.total_bytes {
                 return Err(SegmentFailure::Fatal(
                     "Server returned an incorrect Content-Range".into(),
                 ));
@@ -1650,6 +1850,41 @@ impl DownloadService {
         on_started: &mut impl FnMut(u64, Option<u64>, usize) -> Result<(), String>,
         on_progress: &mut impl FnMut(DownloadProgress) -> Result<(), String>,
     ) -> Result<(u64, Option<u64>, usize), String> {
+        // HEAD is bounded independently of body time. Pin all parallel requests
+        // to one representation, including retries, splits and already-done parts.
+        let response = send_http_headers(
+            self.client.head(url.clone()).header("Accept-Encoding", "identity"),
+        ).await?;
+        if !response.status().is_success() && ![405, 501].contains(&response.status().as_u16()) {
+            return Err(format!("failed to validate remote representation: {}", response.status()));
+        }
+        check_identity_encoding(&response)?;
+        let identity = if response.status().is_success() {
+            HttpRepresentation::from_response(url, &response, parse_content_length(response.headers()))
+                .filter(|identity| identity.total_bytes.is_some_and(|total| total > 0))
+        } else {
+            None
+        };
+        drop(response);
+        let Some(identity) = identity else {
+            // No strong validator means no safe parallel assembly or resume.
+            self.discard_http_partials(target_path, &manifest).await?;
+            return self.download_single(url, target_path, SingleOptions {
+                resume_from: 0, total_bytes: None, throttle,
+            }, on_started, on_progress).await;
+        };
+        let previous = load_http_identity(target_path).await?;
+        let mut manifest = manifest;
+        if previous.as_ref() != Some(&identity) || identity.total_bytes != Some(manifest.total_bytes) {
+            self.discard_http_partials(target_path, &manifest).await?;
+            if let Some(total) = identity.total_bytes.filter(|total| *total != manifest.total_bytes) {
+                manifest = build_segment_manifest_with_count(total, requested_connections);
+            }
+            for segment in &mut manifest.segments {
+                segment.downloaded_bytes = 0;
+            }
+        }
+        save_http_identity(target_path, &identity).await?;
         let total_bytes = manifest.total_bytes;
         let max_parallel = if requested_connections == 0 {
             manifest.segments.len().clamp(1, 16)
@@ -1682,7 +1917,6 @@ impl DownloadService {
 
         // Keep the manifest aligned with reality so it never advertises more
         // progress than the files actually hold.
-        let mut manifest = manifest;
         for (segment, (on_disk, _)) in manifest.segments.iter_mut().zip(&disk_progress) {
             segment.downloaded_bytes = *on_disk;
         }
@@ -1731,7 +1965,7 @@ impl DownloadService {
                     url,
                     target_path,
                     manifest.segments[i].clone(),
-                    total_bytes,
+                    &identity,
                     downloaded.clone(),
                     throttle.clone(),
                     split_rx,
@@ -1853,6 +2087,7 @@ impl DownloadService {
 
         let manifest_path = self.manifest_path_for(target_path);
         let _ = fs::remove_file(&manifest_path).await;
+        let _ = remove_http_identity(target_path).await;
 
         let final_bytes = downloaded.load(Ordering::Relaxed);
         Ok((final_bytes, Some(total_bytes), manifest.segments.len()))
@@ -1959,7 +2194,7 @@ fn media_progress_path(target: &Path) -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(std::env::temp_dir);
     let key = format!("{:x}", Sha256::digest(target.as_os_str().as_encoded_bytes()));
-    root.join("linux-download-manager-custom").join("media-progress").join(format!("{key}.json"))
+    root.join("linux-download-manager").join("media-progress").join(format!("{key}.json"))
 }
 pub async fn read_media_progress(target: &Path) -> Option<MediaTransferDetail> {
     serde_json::from_slice(&fs::read(media_progress_path(target)).await.ok()?).ok()
@@ -2115,6 +2350,7 @@ pub async fn social_media_caption(url: &str) -> Option<String> {
     let facebook = host == "facebook.com" || host.ends_with(".facebook.com");
     if !(instagram || facebook) { return None; }
     let mut command = tokio::process::Command::from(clean_env_command(&resolve_ytdlp_path()?));
+    command.args(crate::platform::ytdlp_runtime_args());
     command.args(["--ignore-config", "--no-playlist", "--skip-download", "--no-warnings",
         "--socket-timeout", "5", "--retries", "0", "--print", if facebook { "%(title,description)j" } else { "%(description)j" }, url]);
     command.kill_on_drop(true);
@@ -3254,8 +3490,6 @@ mod segment_tests {
                 let Ok((mut socket, _)) = listener.accept().await else {
                     break;
                 };
-                let seen = counter.fetch_add(1, Ordering::SeqCst);
-
                 let mut request = Vec::new();
                 let mut chunk = [0u8; 1024];
                 loop {
@@ -3272,6 +3506,12 @@ mod segment_tests {
                 }
 
                 let text = String::from_utf8_lossy(&request).to_lowercase();
+                if text.starts_with("head ") {
+                    let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {body_len}\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n");
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    continue;
+                }
+                let seen = counter.fetch_add(1, Ordering::SeqCst);
                 let range = text
                     .lines()
                     .find_map(|line| line.strip_prefix("range: bytes="))
@@ -3326,7 +3566,7 @@ mod segment_tests {
         let server = tokio::spawn(async move {
             loop {
                 let Ok((mut socket, _)) = listener.accept().await else { break };
-                let seen = observed.fetch_add(1, Ordering::SeqCst);
+                let observed = observed.clone();
                 tokio::spawn(async move {
                     let mut request = Vec::new();
                     let mut buffer = [0u8; 1024];
@@ -3337,6 +3577,12 @@ mod segment_tests {
                         if request.windows(4).any(|window| window == b"\r\n\r\n") { break; }
                     }
                     let text = String::from_utf8_lossy(&request).to_lowercase();
+                    if text.starts_with("head ") {
+                        let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {body_len}\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n");
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        return;
+                    }
+                    let seen = observed.fetch_add(1, Ordering::SeqCst);
                     let Some((start, end)) = text.lines()
                         .find_map(|line| line.strip_prefix("range: bytes="))
                         .and_then(|value| value.trim().split_once('-'))
@@ -3402,6 +3648,12 @@ mod segment_tests {
         let (addr, requests, server) =
             spawn_paced_range_server(body_len, Duration::from_millis(1), false).await;
         let url = Url::parse(&format!("http://{addr}/file.bin")).unwrap();
+        save_http_identity(&target, &HttpRepresentation {
+            source_url: url.as_str().to_owned(),
+            response_url: url.as_str().to_owned(),
+            total_bytes: Some(body_len as u64),
+            validator: HttpValidator::Etag("\"fixture\"".into()),
+        }).await.unwrap();
         let result = service.download_with_segments(
             &url, &target, manifest, 8, None, &mut |_, _, _| Ok(()), &mut |_| Ok(())
         ).await;
@@ -3513,7 +3765,6 @@ mod segment_tests {
                 let Ok((mut socket, _)) = listener.accept().await else { break };
                 let observed = observed.clone();
                 tokio::spawn(async move {
-                    observed.fetch_add(1, Ordering::SeqCst);
                     let mut request = Vec::new();
                     let mut buffer = [0u8; 1024];
                     loop {
@@ -3523,6 +3774,12 @@ mod segment_tests {
                         if request.windows(4).any(|window| window == b"\r\n\r\n") { break; }
                     }
                     let text = String::from_utf8_lossy(&request).to_lowercase();
+                    if text.starts_with("head ") {
+                        let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {body_len}\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n");
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        return;
+                    }
+                    observed.fetch_add(1, Ordering::SeqCst);
                     let Some((start, end)) = text.lines()
                         .find_map(|line| line.strip_prefix("range: bytes="))
                         .and_then(|value| value.trim().split_once('-'))
@@ -3917,7 +4174,6 @@ mod transfer_feature_tests {
         let seen = calls.clone();
         let handle = tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
-                let n = seen.fetch_add(1, Ordering::SeqCst);
                 let mut request = Vec::new();
                 let mut buf = [0u8; 4096];
                 loop {
@@ -3931,6 +4187,11 @@ mod transfer_feature_tests {
                     }
                 }
                 let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                if text.starts_with("head ") {
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n").await;
+                    continue;
+                }
+                let n = seen.fetch_add(1, Ordering::SeqCst);
                 if mode == "throttle" && n == 0 {
                     let _=stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
                     continue;

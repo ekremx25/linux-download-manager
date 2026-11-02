@@ -41,10 +41,10 @@ build() {
 package() {
   cd "$srcdir/linux-download-manager"
   local libdir="$pkgdir/usr/lib/linux-download-manager"
-  install -Dm755 "$srcdir/target/release/linux-download-manager-custom" "$libdir/linux-download-manager-custom"
+  install -Dm755 "$srcdir/target/release/linux-download-manager" "$libdir/linux-download-manager"
   install -Dm755 "$srcdir/target/release/browser_native_host" "$libdir/browser_native_host"
   install -dm755 "$pkgdir/usr/bin"
-  ln -s /usr/lib/linux-download-manager/linux-download-manager-custom "$pkgdir/usr/bin/linux-download-manager"
+  ln -s /usr/lib/linux-download-manager/linux-download-manager "$pkgdir/usr/bin/linux-download-manager"
   install -Dm644 "$srcdir/linux-download-manager.desktop" "$pkgdir/usr/share/applications/linux-download-manager.desktop"
   local size
   for size in 32 64 128 256 512; do

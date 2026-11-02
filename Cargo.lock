@@ -2151,8 +2151,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "linux-download-manager-custom"
-version = "0.2.9"
+name = "linux-download-manager"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "futures-util",

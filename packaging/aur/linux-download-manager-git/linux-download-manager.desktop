@@ -5,6 +5,6 @@ Name=Linux Download Manager
 Comment=Download files and videos with browser integration
 Exec=/usr/bin/linux-download-manager %U
 Icon=linux-download-manager
-StartupWMClass=linux-download-manager-custom
+StartupWMClass=linux-download-manager
 Terminal=false
 Categories=Network;FileTransfer;

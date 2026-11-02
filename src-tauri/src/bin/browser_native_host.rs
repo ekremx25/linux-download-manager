@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[path = "../trusted_executable.rs"]
+mod trusted_executable;
+
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
 fn main() {
@@ -136,62 +139,45 @@ fn ensure_desktop_app_running() -> Result<(), String> {
 }
 
 fn desktop_binary_path() -> Result<PathBuf, String> {
-    // A package-managed bridge must never select a previously saved AppImage.
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    if executable.parent() == Some(std::path::Path::new("/usr/lib/linux-download-manager")) {
-        let app = executable.with_file_name("linux-download-manager-custom");
-        return app.is_file().then_some(app)
-            .ok_or_else(|| "Package-managed LDM executable is missing; reinstall the package".into());
-    }
-    if let Ok(data) = std::env::var("XDG_DATA_HOME").map(PathBuf::from).or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".local/share"))).map(|p| p.join("linux-download-manager-custom")) {
-        if let Ok(saved) = std::fs::read_to_string(data.join(".appimage_path")) {
-            let path = PathBuf::from(saved);
-            if path.is_absolute() && path.is_file() { return Ok(path); }
-        }
-    }
-    let current_exe =
-        std::env::current_exe().map_err(|error| format!("failed to resolve host path: {error}"))?;
-    let Some(parent) = current_exe.parent() else {
-        return Err("native host executable parent directory is missing".to_string());
-    };
+    let home = std::env::var_os("HOME").map(PathBuf::from)
+        .ok_or("HOME environment variable is missing")?;
+    let data = linux_download_manager::resolve_app_data_dir()?;
+    let package_sibling = (executable.parent() == Some(Path::new("/usr/lib/linux-download-manager")))
+        .then(|| executable.with_file_name("linux-download-manager"));
+    select_desktop_binary(package_sibling.as_deref(), &data, &fixed_install_paths(&home), trusted_executable::current_uid()?)
+}
 
-    let candidate = parent.join("linux-download-manager-custom");
-    if candidate.exists() {
-        return Ok(candidate);
-    }
-    let candidate_orig = parent.join("linux-download-manager");
-    if candidate_orig.exists() {
-        return Ok(candidate_orig);
-    }
+fn fixed_install_paths(home: &Path) -> Vec<PathBuf> {
+    [home.join(".local/bin"), PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin")]
+        .into_iter().map(|directory| directory.join("linux-download-manager")).collect()
+}
 
-    let home = std::env::var("HOME").unwrap_or_default();
-    let search_dirs = [
-        format!("{home}/Downloads"),
-        format!("{home}/Applications"),
-        format!("{home}/Desktop"),
-        format!("{home}/.local/bin"),
-        "/usr/local/bin".to_string(),
-        home.to_string(),
-    ];
-
-    for dir in &search_dirs {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains("Linux_Download_Manager") && name.ends_with(".AppImage") {
-                    return Ok(entry.path());
-                }
-                if name == "linux-download-manager-custom" || name == "linux-download-manager" {
-                    return Ok(entry.path());
-                }
+fn select_desktop_binary(
+    package_sibling: Option<&Path>,
+    data: &Path,
+    fixed_paths: &[PathBuf],
+    uid: u32,
+) -> Result<PathBuf, String> {
+    use trusted_executable::trusted_file;
+    // A package-managed bridge must never fall back to a saved user executable.
+    if let Some(app) = package_sibling {
+        return trusted_file(app, uid, true).then(|| app.to_path_buf())
+            .ok_or_else(|| "Package-managed LDM executable is missing or unsafe; reinstall the package".into());
+    }
+    let registration = data.join(".appimage_path");
+    if trusted_file(&registration, uid, false)
+        && std::fs::metadata(&registration).is_ok_and(|metadata| metadata.len() <= 4096)
+    {
+        if let Ok(saved) = std::fs::read_to_string(&registration) {
+            let app = PathBuf::from(saved.trim_end_matches(['\r', '\n']));
+            if trusted_file(&app, uid, true) {
+                return Ok(app);
             }
         }
     }
-
-    Err(format!(
-        "desktop application binary was not found: searched near {} and common directories",
-        candidate.display()
-    ))
+    fixed_paths.iter().find(|candidate| trusted_file(candidate, uid, true)).cloned()
+        .ok_or_else(|| "LDM executable is missing or unsafe. Reinstall LDM or launch your AppImage once to register its exact path.".into())
 }
 
 fn is_desktop_app_running() -> Result<bool, String> {
@@ -233,8 +219,92 @@ fn cmdline_contains_desktop_binary(contents: &[u8]) -> bool {
         .any(|segment| {
             segment.ends_with("/linux-download-manager")
                 || segment == "linux-download-manager"
-                || segment.ends_with("/linux-download-manager-custom")
-                || segment == "linux-download-manager-custom"
                 || segment.contains("Linux_Download_Manager") && segment.contains(".AppImage")
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use trusted_executable::{current_uid, test_support::Fixture};
+
+    #[test]
+    fn downloaded_desktop_and_arbitrary_sibling_names_are_never_discovered() {
+        let fixture = Fixture::new();
+        for location in ["Downloads", "Desktop", "Applications", "host-directory", ""] {
+            fixture.script(format!("{location}/Linux_Download_Manager_evil.AppImage").trim_start_matches('/'), "exit 0");
+            fixture.script(format!("{location}/linux-download-manager-custom").trim_start_matches('/'), "exit 0");
+        }
+        let fixed: Vec<_> = fixed_install_paths(&fixture.path).into_iter()
+            .filter(|path| path.starts_with(&fixture.path)).collect();
+        assert!(select_desktop_binary(None, &fixture.path, &fixed, current_uid().unwrap()).is_err());
+        let installed = fixture.script(".local/bin/linux-download-manager", "exit 0");
+        assert_eq!(select_desktop_binary(None, &fixture.path, &fixed, current_uid().unwrap()).unwrap(), installed);
+    }
+
+    #[test]
+    fn legacy_custom_binary_is_never_launched() {
+        let fixture = Fixture::new();
+        fixture.script(".local/bin/linux-download-manager-custom", "exit 0");
+        let fixed: Vec<_> = fixed_install_paths(&fixture.path).into_iter()
+            .filter(|path| path.starts_with(&fixture.path)).collect();
+        assert!(select_desktop_binary(None, &fixture.path, &fixed, current_uid().unwrap()).is_err());
+        let installed = fixture.script(".local/bin/linux-download-manager", "exit 0");
+        assert_eq!(select_desktop_binary(None, &fixture.path, &fixed, current_uid().unwrap()).unwrap(), installed);
+    }
+
+    #[test]
+    fn registered_appimage_and_package_precedence_are_preserved() {
+        let fixture = Fixture::new();
+        let uid = current_uid().unwrap();
+        let image = fixture.script("Downloads/Explicit image.AppImage", "exit 0");
+        let registration = fixture.path.join(".appimage_path");
+        fs::write(&registration, format!("{}\n", image.display())).unwrap();
+        fs::set_permissions(&registration, fs::Permissions::from_mode(0o600)).unwrap();
+        let fixed = fixture.script(".local/bin/linux-download-manager", "exit 0");
+        assert_eq!(select_desktop_binary(None, &fixture.path, std::slice::from_ref(&fixed), uid).unwrap(), image);
+        let package = fixture.script("package/linux-download-manager", "exit 0");
+        assert_eq!(select_desktop_binary(Some(&package), &fixture.path, std::slice::from_ref(&fixed), uid).unwrap(), package);
+        fs::remove_file(&package).unwrap();
+        assert!(select_desktop_binary(Some(&package), &fixture.path, &[fixed], uid).is_err());
+    }
+
+    #[test]
+    fn registration_and_candidates_require_safe_executable_files() {
+        let fixture = Fixture::new();
+        let uid = current_uid().unwrap();
+        let image = fixture.script("registered.AppImage", "exit 0");
+        let registration = fixture.path.join(".appimage_path");
+        fs::write(&registration, image.to_str().unwrap()).unwrap();
+        fs::set_permissions(&registration, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(select_desktop_binary(None, &fixture.path, &[], uid).is_ok());
+        fs::set_permissions(&image, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(select_desktop_binary(None, &fixture.path, &[], uid).is_err());
+        fs::set_permissions(&image, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&registration, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(select_desktop_binary(None, &fixture.path, &[], uid).is_err());
+        fs::remove_file(&registration).unwrap();
+        let real = fixture.path.join("real-registration");
+        fs::write(&real, image.to_str().unwrap()).unwrap();
+        symlink(&real, &registration).unwrap();
+        assert!(select_desktop_binary(None, &fixture.path, &[], uid).is_err());
+        let image_link = fixture.path.join("image-link");
+        symlink(&image, &image_link).unwrap();
+        assert!(select_desktop_binary(None, &fixture.path, &[image_link], uid).is_err());
+        assert!(select_desktop_binary(None, &fixture.path, std::slice::from_ref(&fixture.path), uid).is_err());
+    }
+
+    #[test]
+    fn relative_partial_and_oversized_registrations_are_not_accepted() {
+        let fixture = Fixture::new();
+        let uid = current_uid().unwrap();
+        let registration = fixture.path.join(".appimage_path");
+        for text in ["relative.AppImage".to_string(), "/missing/partial.AppImage".into(), "x".repeat(4097)] {
+            fs::write(&registration, text).unwrap();
+            fs::set_permissions(&registration, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(select_desktop_binary(None, &fixture.path, &[], uid).is_err());
+        }
+    }
 }

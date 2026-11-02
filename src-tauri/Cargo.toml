@@ -1,19 +1,19 @@
 [package]
-name = "linux-download-manager-custom"
-version = "0.2.9"
+name = "linux-download-manager"
+version = "0.3.0"
 license = "MIT"
-description = "Linux-first IDM-inspired download manager desktop app (Custom UI)"
+description = "Linux-first IDM-inspired download manager desktop app"
 edition = "2024"
 rust-version = "1.85"
 build = "build.rs"
-default-run = "linux-download-manager-custom"
+default-run = "linux-download-manager"
 
 [lib]
 name = "linux_download_manager"
 path = "src/lib.rs"
 
 [[bin]]
-name = "linux-download-manager-custom"
+name = "linux-download-manager"
 path = "src/main.rs"
 
 [[bin]]

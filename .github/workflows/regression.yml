@@ -1,0 +1,49 @@
+name: Regression tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install existing Linux build requirements
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check release version equality
+        run: |
+          node <<'JS'
+          const fs = require('node:fs');
+          const assert = require('node:assert/strict');
+          const cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8').match(/^version = "([^"]+)"$/m)[1];
+          for (const file of ['src-tauri/tauri.conf.json', 'browser/chromium/manifest.json', 'browser/firefox/manifest.json']) {
+            assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).version, cargo, file);
+          }
+          JS
+      - name: Current stable Rust tests
+        run: cargo test --workspace --locked
+      - name: Dependency-free Node regressions
+        run: |
+          node scripts/test-extension-settings.cjs
+          node scripts/test-progress-ui.cjs
+          node scripts/test-hidden-hls-playlists.cjs
+          node scripts/test-youtube-audio.cjs
+          node scripts/test-embedded-player.cjs
+          node scripts/test-security-ui.cjs
+      - name: Isolated fake-package installer regressions (no network or real install)
+        env:
+          LDM_INSTALLER_TEST_ROOT: ${{ runner.temp }}/ldm-installer-tests
+        run: |
+          bash -n install.sh uninstall.sh
+          python3 scripts/test-installer.py -v
