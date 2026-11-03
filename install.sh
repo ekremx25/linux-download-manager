@@ -254,6 +254,21 @@ EOF
     gtk-update-icon-cache -f -t "${INSTALL_HOME}/.local/share/icons/hicolor/" 2>/dev/null || true
 }
 
+install_bundled_ytdlp() {
+  local bundled="$REPO_DIR/bin/yt-dlp" destination="$BIN_DIR/yt-dlp" actual
+  [[ -f "$bundled" ]] || return 0
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    [[ -x "$destination" ]] || die "Existing $destination is not executable; repair or remove it."
+    info "    existing user yt-dlp preserved"
+    return 0
+  fi
+  actual="$(sha256sum "$bundled")"
+  [[ "${actual%% *}" == 767ba9dce7052aa196f8b12652f433d76de128ba168966fa84b6394d5e6c6795 ]] \
+    || die "Bundled yt-dlp checksum mismatch; no helper was installed."
+  install_atomic 0755 "$bundled" "$destination"
+  info "    bundled yt-dlp 2026.10.26 installed offline → $destination"
+}
+
 install_ytdlp_and_deps() {
   log "Installing yt-dlp and its runtime dependencies"
 
@@ -518,6 +533,7 @@ install_binary
 install_extension
 install_desktop_entry
 install_native_host
+install_bundled_ytdlp
 if [[ "$NO_DEPS" == 0 ]]; then install_ytdlp_and_deps;
 else
   for tool in yt-dlp ffmpeg; do command -v "$tool" >/dev/null || warn "$tool is missing: install it for video downloads."; done

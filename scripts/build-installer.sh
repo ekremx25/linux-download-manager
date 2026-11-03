@@ -20,6 +20,7 @@ mkdir -p "$package/bin" "$package/browser/chromium" "$package/browser/firefox" "
 for binary in linux-download-manager browser_native_host; do
   install -m 0755 "${CARGO_TARGET_DIR:-$root/target}/release/$binary" "$package/bin/$binary"
 done
+bash "$root/scripts/fetch-bundled-ytdlp.sh" "$package/bin/yt-dlp"
 install -m 0755 install.sh uninstall.sh "$package/"
 for file in manifest.json service-worker.js player-manifest-observer.js youtube-audio-observer.js content-script.js content-style.css popup.html popup.js popup.css; do
   install -m 0644 "browser/chromium/$file" "$package/browser/chromium/$file"
@@ -90,8 +91,10 @@ Linux Download Manager
 This prebuilt package is for x86_64 Linux. No Rust compiler is required.
 GTK3, WebKitGTK 4.1 and compatible system libraries are required. Binaries built
 with a newer glibc may not run on older distributions; use install.sh from the
-source repository to build on those systems. Video support requires yt-dlp and
-ffmpeg.
+source repository to build on those systems. yt-dlp 2026.10.26 is bundled and
+installed offline to ~/.local/bin/yt-dlp when absent (also with --no-deps).
+Existing user helpers are preserved. Python 3, FFmpeg and Node or Deno are
+still required; normal installation may request sudo for system dependencies.
 
 Update: run install.sh from the newer package.
 Uninstall: bash ./uninstall.sh (history and downloaded files are preserved).

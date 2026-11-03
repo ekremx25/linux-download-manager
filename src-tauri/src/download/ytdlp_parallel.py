@@ -15,6 +15,9 @@ import zipfile
 from urllib.parse import urlsplit
 
 executable = sys.argv.pop(1)
+# The Rust resolver may return a command name from PATH. Resolve it before
+# checking for a zipapp or using execv, which does not search PATH.
+executable = shutil.which(executable) or executable
 if not zipfile.is_zipfile(executable):
     os.execv(executable, [executable, *sys.argv[1:]])
 sys.path.insert(0, executable)

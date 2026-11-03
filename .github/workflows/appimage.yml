@@ -54,7 +54,10 @@ jobs:
           firefox=$(find squashfs-root -path '*/firefox/manifest.json' -print -quit)
           test -n "$firefox"
           cmp browser/firefox/manifest.json "$firefox"
-          cp "$image" "dist/Linux_Download_Manager-${version}-x86_64.AppImage"
+          bash scripts/repack-with-ytdlp.sh "$image" "dist/Linux_Download_Manager-${version}-yt-dlp-x86_64.AppImage"
+          test_home=$(mktemp -d)
+          HOME="$test_home" "dist/Linux_Download_Manager-${version}-yt-dlp-x86_64.AppImage" --appimage-extract-and-run --ldm-check-tools
+          test -x "$test_home/.local/bin/yt-dlp"
           cd dist
           sha256sum *.AppImage > SHA256SUMS-AppImage
       - name: Build and verify installer archive
@@ -64,6 +67,8 @@ jobs:
           tar -xzf dist/LinuxDownloadManager-*-linux-x86_64.tar.gz -C installer-check
           package=$(find installer-check -mindepth 1 -maxdepth 1 -type d -print -quit)
           (cd "$package" && sha256sum -c SHA256SUMS)
+          test -x "$package/bin/yt-dlp"
+          "$package/bin/yt-dlp" --version
           for file in manifest.json service-worker.js player-manifest-observer.js youtube-audio-observer.js content-script.js content-style.css popup.html popup.js popup.css; do
             cmp "browser/chromium/$file" "$package/browser/chromium/$file"
           done

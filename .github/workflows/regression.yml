@@ -47,3 +47,4 @@ jobs:
         run: |
           bash -n install.sh uninstall.sh
           python3 scripts/test-installer.py -v
+          python3 scripts/test-bundled-ytdlp.py -v

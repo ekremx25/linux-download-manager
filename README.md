@@ -17,9 +17,11 @@
 
 **The current version is available on the `main` branch and as ready-to-use Linux packages.**
 
-[**Download AppImage**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.3.0/Linux_Download_Manager-0.3.0-x86_64.AppImage) · [**Download installer**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.3.0/LinuxDownloadManager-0.3.0-linux-x86_64.tar.gz) · [Release notes](https://github.com/ekremx25/linux-download-manager/releases/tag/v0.3.0)
+[**Download AppImage**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.3.0/Linux_Download_Manager-0.3.0-yt-dlp-x86_64.AppImage) · [**Download installer**](https://github.com/ekremx25/linux-download-manager/releases/download/v0.3.0/LinuxDownloadManager-0.3.0-linux-x86_64.tar.gz) · [Release notes](https://github.com/ekremx25/linux-download-manager/releases/tag/v0.3.0)
 
-This is a security and reliability release. LDM no longer downloads programs when it starts, keeps your yt-dlp configuration untouched, stores its data privately, and refuses to resume a download whose file changed on the server. If yt-dlp is missing, install it with your package manager or the installer.
+This is a security and reliability release. LDM no longer downloads programs when it starts, keeps your yt-dlp configuration untouched, stores its data privately, and refuses to resume a download whose file changed on the server. The updated AppImage and installer archive include yt-dlp 2026.10.26 and install it offline when the user helper is missing.
+
+The downloads were repackaged on **2026-11-03** using the original 0.3.0 application binaries. The old AppImage was removed. The installer archive keeps its existing filename; download it again for the bundled yt-dlp update. Verify both packages with `SHA256SUMS`.
 
 Choose **AppImage** for a portable application or **installer** for desktop installation. Both packages target **Linux x86_64**.
 
@@ -29,22 +31,22 @@ Choose **AppImage** for a portable application or **installer** for desktop inst
 
 | Package | Download | How to launch |
 | --- | --- | --- |
-| Portable AppImage | [Linux_Download_Manager-0.3.0-x86_64.AppImage](https://github.com/ekremx25/linux-download-manager/releases/download/v0.3.0/Linux_Download_Manager-0.3.0-x86_64.AppImage) | Make executable, then open it. |
+| Portable AppImage | [Linux_Download_Manager-0.3.0-yt-dlp-x86_64.AppImage](https://github.com/ekremx25/linux-download-manager/releases/download/v0.3.0/Linux_Download_Manager-0.3.0-yt-dlp-x86_64.AppImage) | Make executable, then open it. |
 | Desktop installer | [LinuxDownloadManager-0.3.0-linux-x86_64.tar.gz](https://github.com/ekremx25/linux-download-manager/releases/download/v0.3.0/LinuxDownloadManager-0.3.0-linux-x86_64.tar.gz) | Extract, then run `Install.desktop` or `bash Install.sh`. |
 | Checksums | [SHA256SUMS](https://github.com/ekremx25/linux-download-manager/releases/download/v0.3.0/SHA256SUMS) | Run `sha256sum --ignore-missing -c SHA256SUMS` beside your download. |
 
 ### AppImage
 
 ```bash
-chmod +x Linux_Download_Manager-0.3.0-x86_64.AppImage
-./Linux_Download_Manager-0.3.0-x86_64.AppImage
+chmod +x Linux_Download_Manager-0.3.0-yt-dlp-x86_64.AppImage
+./Linux_Download_Manager-0.3.0-yt-dlp-x86_64.AppImage
 ```
 
 Keep the AppImage in a permanent location, such as `~/Applications`: browser integration and desktop autostart use its path. If FUSE is unavailable, launch with `--appimage-extract-and-run`.
 
 Release packages are built on Ubuntu 22.04. The AppImage targets Ubuntu 22.04+ and compatible x86_64 Linux distributions; compatibility with every distribution is not guaranteed. The installer archive uses your system's GTK3 and WebKitGTK 4.1 libraries. If those are incompatible, build from source below.
 
-**Video tools:** FFmpeg is needed for merging and conversion. Supported site extraction also uses yt-dlp and a JavaScript runtime. The AppImage does not install system packages; the source/archive installer can install dependencies with `pacman`, `apt` or `dnf`. LDM no longer downloads executables during startup: install missing tools with your package manager or the installer. Runtime options are passed per invocation without rewriting your shared yt-dlp configuration.
+**Video tools:** FFmpeg is needed for merging and conversion. Supported site extraction also uses yt-dlp and a JavaScript runtime. The AppImage does not install system packages; the source/archive installer can install dependencies with `pacman`, `apt` or `dnf`. The AppImage installs its bundled yt-dlp on first launch; the archive installs it when you run `Install.sh`, including with `--no-deps`. Both use `~/.local/bin/yt-dlp` and preserve an existing user helper. This needs no network or sudo for yt-dlp itself. System Python 3, FFmpeg and Node or Deno are still required. Runtime options are passed per invocation without rewriting your shared yt-dlp configuration.
 
 **Browser integration:** installing or launching LDM prepares the extension files. Complete the one-time browser steps below to activate them.
 
@@ -77,8 +79,8 @@ Run as your normal user. The installer requests `sudo` for system dependencies a
 
 - **No downloads at startup.** LDM no longer fetches yt-dlp or other programs
   when it starts. It checks the tools already on your system, with a timeout,
-  and stops a tool that hangs. Install missing tools with your package manager
-  or the installer, which verifies yt-dlp's SHA-256 checksum before using it.
+  and stops a tool that hangs. Updated packages install their bundled yt-dlp
+  offline when absent; package builds verify its pinned SHA-256 checksum.
 - **Your yt-dlp configuration stays yours.** Options are passed to each run
   instead of rewriting the shared yt-dlp configuration.
 - **Private data.** The data folder and download database are readable only by
@@ -289,6 +291,20 @@ The GitHub Actions **Regression tests** workflow runs locked Rust, dependency-fr
 | `docs/` | Visual installation instructions and screenshots |
 
 Built with [Tauri](https://tauri.app/), [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [FFmpeg](https://ffmpeg.org/).
+
+### Building packages with bundled yt-dlp
+
+`bash scripts/build-installer.sh --skip-build` packages existing release binaries
+and downloads the pinned standalone yt-dlp helper, checking its SHA-256 before
+adding it to the archive. `bash scripts/repack-with-ytdlp.sh INPUT.AppImage OUTPUT.AppImage`
+adds the same helper and offline first-launch installation to a Tauri AppImage.
+The Build Linux packages workflow runs both steps. Network access is needed at
+build time; users do not need a separate yt-dlp download.
+
+The PATH-resolution fix is in `src-tauri/src/download/ytdlp_parallel.py` for future
+source builds. The already published 0.3.0 repacks use an absolute installed helper
+path to avoid the same error without recompiling the application.
+
 
 ## License
 
