@@ -337,3 +337,22 @@ assert.equal(vm.runInContext('getMediaCandidatesForTab(89).length',worker),1);
 const recovered=vm.runInContext("chooseBestMediaCapturePayload(89,'https://bad-cdn.example/hls/video-7/master.m3u8','https://site.example/watch/7','Video')",worker);
 assert.equal(recovered.capture.url,'https://good-cdn.example/hls/video-7/master.m3u8');
 console.log('PASS: rejected 410 playlist discarded and working stream selected');
+
+// Sheila is used by the Mac player, including opaque player paths.
+const sheilaPage = 'https://yd.sheila.stream/opaque-player-id';
+assert.equal(get(frame(sheilaPage)).playerPageUrl, sheilaPage);
+assert.equal(get(frame('https://sheila.stream.evil.example/opaque-player-id')), null);
+for (const browser of ['chromium', 'firefox']) {
+  const manifest = JSON.parse(fs.readFileSync(`browser/${browser}/manifest.json`, 'utf8'));
+  assert.ok(manifest.content_scripts.some(s => s.world === 'MAIN'
+    && s.run_at === 'document_start' && s.all_frames
+    && s.js.includes('player-manifest-observer.js')
+    && s.matches.includes('https://*.sheila.stream/*')));
+}
+vm.runInContext("rememberMediaRequest(90,'https://cdn.example/opaque-manifest','observed-manifest','https://yd.sheila.stream/opaque-player-id')", worker);
+const sheila = vm.runInContext("chooseBestMediaCapturePayload(90,null,'https://yabancidizi.news/episode','Episode','https://yd.sheila.stream/opaque-player-id')", worker);
+assert.equal(sheila.ok, true);
+assert.equal(sheila.capture.streamManifest, true);
+assert.equal(sheila.capture.url, 'https://cdn.example/opaque-manifest');
+assert.equal(sheila.capture.sourcePageUrl, sheilaPage);
+console.log('PASS: Sheila player matched and opaque manifest sent with player context');

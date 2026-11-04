@@ -34,7 +34,7 @@
       "all_frames": true
     },
     {
-      "matches": ["https://*.molystream.org/*", "https://*.hotstream.club/*", "https://*.rapidvid.org/*"],
+      "matches": ["https://*.molystream.org/*", "https://*.hotstream.club/*", "https://*.rapidvid.org/*", "https://*.sheila.stream/*"],
       "js": ["player-manifest-observer.js"],
       "run_at": "document_start",
       "all_frames": true,

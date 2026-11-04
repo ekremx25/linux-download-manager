@@ -176,7 +176,7 @@ function bootstrap() {
     if(message?.type!=='selected-audio-language')return;
     selectedAudioLanguage().then(language=>respond({language}));return true;
   });
-  if (/(^|\.)(molystream\.org|hotstream\.club|rapidvid\.org)$/i.test(window.location.hostname)) {
+  if (/(^|\.)(molystream\.org|hotstream\.club|rapidvid\.org|sheila\.stream)$/i.test(window.location.hostname)) {
     window.addEventListener("message", (event) => {
       if (event.source !== window || event.data?.type !== "ldm-player-manifest") return;
       const url = normalizeUrl(event.data.url);
@@ -1358,7 +1358,8 @@ function candidateFromPlayerFrame(frame) {
   const path = parsed.pathname;
   const rapidvidPlayer = /(^|\.)rapidvid\.org$/i.test(parsed.hostname)
     && /^\/vx\/[^/]+\/?$/.test(path);
-  if (!rapidvidPlayer && !detectedPlayerPages.has(url)
+  const sheilaPlayer = /(^|\.)sheila\.stream$/i.test(parsed.hostname);
+  if (!rapidvidPlayer && !sheilaPlayer && !detectedPlayerPages.has(url)
       && !/(?:^|\/)(?:embed|player)(?:[/.]|$)/i.test(path)) return null;
   const rect = frame.getBoundingClientRect();
   if (rect.width < 180 || rect.height < 120 || !isVisibleMediaRect(rect)) return null;

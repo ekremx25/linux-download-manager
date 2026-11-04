@@ -1125,6 +1125,7 @@ impl DownloadService {
                 }
 
                 let mut command = Command::new("ffmpeg");
+                crate::platform::without_bundle_env(&mut command);
                 command.args(["-y", "-nostdin", "-loglevel", "error"]);
                 if prepared.is_none() {
                     command.args([
@@ -1365,6 +1366,7 @@ impl DownloadService {
         on_started(0, None, 2)?;
 
         let mut command = Command::new("ffmpeg");
+        crate::platform::without_bundle_env(&mut command);
         command
             .arg("-y")
             .arg("-nostdin")
@@ -2796,7 +2798,7 @@ mod aac_repair_tests {
 }
 
 fn probe_media_duration(path: &Path) -> Result<f64, String> {
-    let output = Command::new("ffprobe")
+    let output = crate::platform::without_bundle_env(&mut Command::new("ffprobe"))
         .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"])
         .arg(path)
         .output()
@@ -2815,7 +2817,7 @@ fn probe_media_duration(path: &Path) -> Result<f64, String> {
 }
 
 fn ensure_ffmpeg_available() -> Result<(), String> {
-    Command::new("ffmpeg")
+    crate::platform::without_bundle_env(&mut Command::new("ffmpeg"))
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

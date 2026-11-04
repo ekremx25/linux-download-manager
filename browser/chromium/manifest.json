@@ -37,7 +37,8 @@
       "matches": [
         "https://*.molystream.org/*",
         "https://*.hotstream.club/*",
-        "https://*.rapidvid.org/*"
+        "https://*.rapidvid.org/*",
+        "https://*.sheila.stream/*"
       ],
       "js": [
         "player-manifest-observer.js"
