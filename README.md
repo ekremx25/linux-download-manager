@@ -21,7 +21,7 @@
 
 This is a security and reliability release. LDM no longer downloads programs when it starts, keeps your yt-dlp configuration untouched, stores its data privately, and refuses to resume a download whose file changed on the server. The updated AppImage and installer archive include yt-dlp 2026.10.26 and install it offline when the user helper is missing.
 
-The AppImage was rebuilt on **2026-11-04** from commit [`eb06544`](https://github.com/ekremx25/linux-download-manager/commit/eb06544433f1a3c47ed747c719f9e82fb9686239), adding Sheila player stream capture and fixing FFmpeg/ffprobe failures caused by inherited AppImage library paths. It includes yt-dlp 2026.10.26. The download filename is unchanged; download it again to get these fixes, restart LDM, and reload the browser extension. The installer archive remains the **2026-11-03** package and does not yet include these fixes. Verify your download with `SHA256SUMS`.
+The AppImage and installer archive were rebuilt on **2026-11-04** from commit [`eb06544`](https://github.com/ekremx25/linux-download-manager/commit/eb06544433f1a3c47ed747c719f9e82fb9686239), adding Sheila player stream capture and fixing FFmpeg/ffprobe failures caused by inherited AppImage library paths. Both include yt-dlp 2026.10.26. The download filenames are unchanged; download your package again to get these fixes, restart LDM, and reload the browser extension. Verify your download with `SHA256SUMS`.
 
 Choose **AppImage** for a portable application or **installer** for desktop installation. Both packages target **Linux x86_64**.
 
